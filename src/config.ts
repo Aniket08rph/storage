@@ -106,6 +106,7 @@ type StorageConfigType = {
   logflareEnabled?: boolean
   logflareApiKey?: string
   logflareSourceToken?: string
+  logflareBatchSize: number
   pgQueueEnable: boolean
   pgQueueEnableWorkers?: boolean
   pgQueueReadWriteTimeout: number
@@ -115,6 +116,7 @@ type StorageConfigType = {
   pgQueueDeleteAfterDays?: number
   pgQueueArchiveCompletedAfterSeconds?: number
   pgQueueRetentionDays?: number
+  pgQueueConcurrentTasksPerQueue: number
   webhookURL?: string
   webhookApiKey?: string
   webhookQueuePullInterval?: number
@@ -379,6 +381,7 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
     logflareEnabled: getOptionalConfigFromEnv('LOGFLARE_ENABLED') === 'true',
     logflareApiKey: getOptionalConfigFromEnv('LOGFLARE_API_KEY'),
     logflareSourceToken: getOptionalConfigFromEnv('LOGFLARE_SOURCE_TOKEN'),
+    logflareBatchSize: parseInt(getOptionalConfigFromEnv('LOGFLARE_BATCH_SIZE') || '200', 10),
     defaultMetricsEnabled: !(
       getOptionalConfigFromEnv('DEFAULT_METRICS_ENABLED', 'ENABLE_DEFAULT_METRICS') === 'false'
     ),
@@ -410,6 +413,10 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
       10
     ),
     pgQueueRetentionDays: parseInt(getOptionalConfigFromEnv('PG_QUEUE_RETENTION_DAYS') || '2', 10),
+    pgQueueConcurrentTasksPerQueue: parseInt(
+      getOptionalConfigFromEnv('PG_QUEUE_CONCURRENT_TASKS_PER_QUEUE') || '50',
+      10
+    ),
 
     // Webhooks
     webhookURL: getOptionalConfigFromEnv('WEBHOOK_URL'),

@@ -1,19 +1,19 @@
 import { getConfig, JwksConfig, JwksConfigKey, JwksConfigKeyOCT } from '../../config'
 import { decrypt, verifyJWT } from '../auth'
+import { JWKSManager, JWKSManagerStoreKnex } from '../auth/jwks'
 import { multitenantKnex } from './multitenant-db'
 import { JWTPayload } from 'jose'
 import { PubSubAdapter } from '../pubsub'
 import { createMutexByKey } from '../concurrency'
 import { ERRORS } from '@internal/errors'
-import { DBMigration } from '@internal/database/migrations'
-import { JWKSManager } from './jwks-manager'
-import { JWKSManagerStoreKnex } from './jwks-manager/store-knex'
 import {
   S3CredentialsManagerStoreKnex,
   S3CredentialsManager,
-} from '@storage/protocols/s3/credentials-manager'
+} from '@storage/protocols/s3/credentials'
 import { TenantConnection } from '@internal/database/connection'
 import { logger, logSchema } from '@internal/monitoring'
+import { DBMigration } from './migrations/types'
+import { lastLocalMigrationName } from '@internal/database/migrations/files'
 
 type DBPoolMode = 'single_use' | 'recycled'
 
@@ -57,7 +57,8 @@ export enum TenantMigrationStatus {
   FAILED_STALE = 'FAILED_STALE',
 }
 
-const { isMultitenant, dbServiceRole, serviceKeyAsync, jwtSecret } = getConfig()
+const { isMultitenant, dbServiceRole, serviceKeyAsync, jwtSecret, dbMigrationFreezeAt } =
+  getConfig()
 
 const tenantConfigCache = new Map<string, TenantConfig>()
 
@@ -199,6 +200,33 @@ export async function getServiceKeyUser(tenantId: string) {
 export async function getServiceKey(tenantId: string): Promise<string> {
   const { serviceKey } = await getTenantConfig(tenantId)
   return serviceKey
+}
+
+enum Capability {
+  LIST_V2 = 'list_V2',
+}
+
+/**
+ * Get the capabilities for a specific tenant
+ * @param tenantId
+ */
+export async function getTenantCapabilities(tenantId: string) {
+  const capabilities: Record<Capability, boolean> = {
+    [Capability.LIST_V2]: false,
+  }
+
+  let latestMigrationName = dbMigrationFreezeAt || (await lastLocalMigrationName())
+
+  if (isMultitenant) {
+    const { migrationVersion } = await getTenantConfig(tenantId)
+    latestMigrationName = migrationVersion || 'initialmigration'
+  }
+
+  if (DBMigration[latestMigrationName] >= DBMigration['optimise-existing-functions']) {
+    capabilities[Capability.LIST_V2] = true
+  }
+
+  return capabilities
 }
 
 /**

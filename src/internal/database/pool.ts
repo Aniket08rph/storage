@@ -2,7 +2,7 @@ import { getConfig } from '../../config'
 import TTLCache from '@isaacs/ttlcache'
 import { knex, Knex } from 'knex'
 import { logger, logSchema } from '@internal/monitoring'
-import { getSslSettings } from '@internal/database/util'
+import { getSslSettings } from '@internal/database/ssl'
 import { wait } from '@internal/concurrency'
 import { JWTPayload } from 'jose'
 import { DbActivePool } from '@internal/monitoring/metrics'
@@ -170,10 +170,14 @@ class TenantPool implements PoolStrategy {
   }
 
   destroy(): Promise<void> {
-    if (!this.pool) {
+    const originalPool = this.pool
+
+    if (!originalPool) {
       return Promise.resolve()
     }
-    return this.drainPool(this.pool)
+
+    this.pool = undefined
+    return this.drainPool(originalPool)
   }
 
   getSettings() {
@@ -217,7 +221,17 @@ class TenantPool implements PoolStrategy {
   }
 
   protected async drainPool(pool: Knex) {
+    if (!pool?.client?.pool) {
+      if (pool) return pool.destroy()
+      return
+    }
+
     while (true) {
+      if (!pool?.client?.pool) {
+        if (pool) return pool.destroy()
+        return
+      }
+
       let waiting = 0
       waiting += pool.client.pool.numPendingAcquires()
       waiting += pool.client.pool.numPendingValidations()
