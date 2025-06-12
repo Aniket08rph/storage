@@ -7,7 +7,27 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper is live with INR price support!"
+    return "🔥 CreativeScraper Phase 2 is live!"
+
+# Function to extract price from a product page
+def extract_price_from_url(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+
+        # Amazon.in selectors
+        price = soup.find('span', {'id': 'priceblock_ourprice'}) \
+            or soup.find('span', {'id': 'priceblock_dealprice'}) \
+            or soup.find('span', {'class': 'a-price-whole'})
+
+        # Flipkart selector
+        if not price:
+            price = soup.find('div', {'class': '_30jeq3 _16Jk6d'})
+
+        return price.get_text(strip=True) if price else "Price not found"
+    except Exception as e:
+        return "Error fetching"
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
@@ -20,32 +40,28 @@ def scrape():
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
-
-    # 🔁 Target only Indian ecommerce platforms
-    search_query = f"{query} price site:flipkart.com OR site:amazon.in"
-    url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
-
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+    search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}+price"
+    response = requests.get(search_url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
 
     results = []
     for a in soup.find_all('a', href=True):
         href = a['href']
         if "/l/?" in href and "uddg=" in href:
-            # Decode DuckDuckGo redirect URL
-            full_url = unquote(href.split("uddg=")[-1])
-            clean_url = full_url.split("&rut=")[0]  # Remove tracker
-
+            full_url = unquote(href.split("uddg=")[-1]).split("&rut=")[0]
             text = a.get_text().strip()
-            if '₹' in text:  # Only include INR prices
+
+            if any(currency in text for currency in ['₹', '$', 'price']):
+                price = extract_price_from_url(full_url)
                 results.append({
                     "title": text,
-                    "url": clean_url
+                    "url": full_url,
+                    "price": price
                 })
 
     return jsonify({
         "product": query,
-        "results": results[:5] if results else "No INR prices found"
+        "results": results[:5]
     })
 
 if __name__ == '__main__':
