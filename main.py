@@ -1,77 +1,87 @@
+# -*- coding: utf-8 -*-
 from flask import Flask, request, jsonify
-from bs4 import BeautifulSoup
 import requests
+from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
+# ✅ Phase 3 - AI-style query cleaner
+def clean_query(raw_query):
+    if not raw_query:
+        return ""
+
+    query = raw_query.lower()
+
+    # 🔥 Remove noise/marketing words
+    remove_words = [
+        'buy', 'cheap', 'best', 'top', 'latest', 'mobile', 'online',
+        '2024', 'price in india', 'under', 'offer', 'deal', 'cost'
+    ]
+    for word in remove_words:
+        query = query.replace(word, '')
+
+    # 🔁 Normalize
+    query = query.replace('iphone fifteen', 'iphone 15')
+    query = query.replace('fifteen', '15')
+
+    # ❌ Remove junk characters
+    query = re.sub(r'[^a-zA-Z0-9\s]', '', query)
+
+    return query.strip() + ' price'
+
+# ✅ Home route
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper is Live!"
+    return "🔥 PriceWise Scraper API is running!"
 
+# ✅ Price scrape endpoint
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.get_json()
-    query = data.get("query")
+    raw_query = data.get('query')
 
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
+    if not raw_query:
+        return jsonify({'error': 'Missing query'}), 400
+
+    query = clean_query(raw_query)
+    logging.info(f"Scraping for: {query}")
 
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    # DuckDuckGo search
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}+buy+online"
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+    search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    
+    try:
+        res = requests.get(search_url, headers=headers, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch search results: {str(e)}"}), 500
 
     results = []
-    seen = set()
-
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = a.get_text(strip=True)
-
+    for a in soup.find_all('a', href=True):
+        href = a['href']
         if "/l/?" in href and "uddg=" in href:
-            clean_url = unquote(href.split("uddg=")[-1].split("&rut=")[0])
+            full_url = unquote(href.split("uddg=")[-1])
+            clean_url = full_url.split("&rut=")[0].strip()
+            text = a.get_text().strip()
 
-            if clean_url not in seen and any(x in text.lower() for x in ["₹", "$", "price", "buy", "offer"]):
-                seen.add(clean_url)
-
-                try:
-                    prod_page = requests.get(clean_url, headers=headers, timeout=5)
-                    prod_soup = BeautifulSoup(prod_page.text, "html.parser")
-
-                    price = extract_price(prod_soup)
-                except:
-                    price = "Error fetching"
-
+            if any(keyword in text.lower() for keyword in ['price', '₹', '$']):
                 results.append({
                     "title": text,
-                    "url": clean_url,
-                    "price": price
+                    "url": clean_url
                 })
 
     return jsonify({
         "product": query,
-        "results": results[:5]
+        "results": results[:5] if results else [{"title": "No price results found", "url": ""}]
     })
 
-# 🔍 Basic price extraction logic
-def extract_price(soup):
-    price_patterns = [
-        r'₹\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?',
-        r'\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?',
-    ]
-    for tag in soup.find_all(["span", "div", "p", "h1", "h2", "h3"]):
-        text = tag.get_text()
-        for pattern in price_patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(0)
-    return "Price not found"
-
+# ✅ Run the server
 if __name__ == '__main__':
+    # For Replit, Render, Railway, etc.
     app.run(host='0.0.0.0', port=8080)
