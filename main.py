@@ -1,87 +1,73 @@
-# -*- coding: utf-8 -*-
 from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re
-import logging
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-# ✅ Phase 3 - AI-style query cleaner
-def clean_query(raw_query):
-    if not raw_query:
-        return ""
+# Function to extract price from product page HTML
+def extract_price_from_url(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
 
-    query = raw_query.lower()
+        # Find ₹ price patterns
+        price_text = soup.get_text()
+        prices = re.findall(r'₹\s?[0-9,]+', price_text)
 
-    # 🔥 Remove noise/marketing words
-    remove_words = [
-        'buy', 'cheap', 'best', 'top', 'latest', 'mobile', 'online',
-        '2024', 'price in india', 'under', 'offer', 'deal', 'cost'
-    ]
-    for word in remove_words:
-        query = query.replace(word, '')
+        if prices:
+            return prices[0]  # Return the first matched price
+        else:
+            return "Price not found"
 
-    # 🔁 Normalize
-    query = query.replace('iphone fifteen', 'iphone 15')
-    query = query.replace('fifteen', '15')
+    except Exception as e:
+        return "Error fetching"
 
-    # ❌ Remove junk characters
-    query = re.sub(r'[^a-zA-Z0-9\s]', '', query)
-
-    return query.strip() + ' price'
-
-# ✅ Home route
 @app.route('/')
 def home():
-    return "🔥 PriceWise Scraper API is running!"
+    return "🔥 CreativeScraper (Phase 3) is live!"
 
-# ✅ Price scrape endpoint
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    data = request.get_json()
-    raw_query = data.get('query')
+    data = request.json
+    query = data.get('query')
 
-    if not raw_query:
-        return jsonify({'error': 'Missing query'}), 400
-
-    query = clean_query(raw_query)
-    logging.info(f"Scraping for: {query}")
+    if not query:
+        return jsonify({'error': 'Query required'}), 400
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) Chrome/115.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
     }
 
-    search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    
-    try:
-        res = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-    except Exception as e:
-        return jsonify({"error": f"Failed to fetch search results: {str(e)}"}), 500
+    # DuckDuckGo Search
+    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    res = requests.get(url, headers=headers, timeout=5)
+    soup = BeautifulSoup(res.text, "html.parser")
 
     results = []
     for a in soup.find_all('a', href=True):
         href = a['href']
         if "/l/?" in href and "uddg=" in href:
             full_url = unquote(href.split("uddg=")[-1])
-            clean_url = full_url.split("&rut=")[0].strip()
+            clean_url = full_url.split("&rut=")[0]
             text = a.get_text().strip()
 
-            if any(keyword in text.lower() for keyword in ['price', '₹', '$']):
+            if '₹' in text or 'price' in text.lower() or '$' in text:
+                price = extract_price_from_url(clean_url)
                 results.append({
                     "title": text,
-                    "url": clean_url
+                    "url": clean_url,
+                    "price": price
                 })
 
     return jsonify({
         "product": query,
-        "results": results[:5] if results else [{"title": "No price results found", "url": ""}]
+        "results": results[:5]
     })
 
-# ✅ Run the server
 if __name__ == '__main__':
-    # For Replit, Render, Railway, etc.
     app.run(host='0.0.0.0', port=8080)
