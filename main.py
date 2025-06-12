@@ -29,12 +29,16 @@ def scrape():
     for a in soup.find_all('a', href=True):
         href = a['href']
         if "/l/?" in href and "uddg=" in href:
-            real_url = unquote(href.split("uddg=")[-1])
+            # Extract and decode the real URL
+            full_url = unquote(href.split("uddg=")[-1])
+            # Remove any tracking like &rut=
+            clean_url = full_url.split("&rut=")[0]
+
             text = a.get_text().strip()
-            if 'price' in text.lower() or '₹' in text:
+            if 'price' in text.lower() or '₹' in text or '$' in text:
                 results.append({
                     "title": text,
-                    "url": real_url
+                    "url": clean_url
                 })
 
     return jsonify({
