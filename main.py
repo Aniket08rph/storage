@@ -24,16 +24,23 @@ def scrape():
     res = requests.get(url, headers=headers)
     soup = BeautifulSoup(res.text, "html.parser")
 
-    links = []
-    for a in soup.find_all('a', href=True):
-        text = a.get_text().lower()
-        if '₹' in text or 'price' in text:
-            links.append(a['href'])
+    from urllib.parse import unquote
 
-    return jsonify({
-        "product": query,
-        "results": links[:5]
-    })
+results = []
+for a in soup.find_all('a', href=True):
+    href = a['href']
+    if "/l/?" in href and "uddg=" in href:
+        real_url = unquote(href.split("uddg=")[-1])
+        text = a.get_text().strip()
+        if 'price' in text.lower() or '₹' in text:
+            results.append({
+                "title": text,
+                "url": real_url
+            })
 
+return jsonify({
+    "product": query,
+    "results": results[:5]
+})
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
