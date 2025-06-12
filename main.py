@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper is live!"
+    return "🔥 CreativeScraper is live with INR price support!"
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
@@ -21,7 +21,10 @@ def scrape():
         "User-Agent": "Mozilla/5.0"
     }
 
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}+price"
+    # 🔁 Target only Indian ecommerce platforms
+    search_query = f"{query} price site:flipkart.com OR site:amazon.in"
+    url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
+
     res = requests.get(url, headers=headers)
     soup = BeautifulSoup(res.text, "html.parser")
 
@@ -29,13 +32,12 @@ def scrape():
     for a in soup.find_all('a', href=True):
         href = a['href']
         if "/l/?" in href and "uddg=" in href:
-            # Extract and decode the real URL
+            # Decode DuckDuckGo redirect URL
             full_url = unquote(href.split("uddg=")[-1])
-            # Remove any tracking like &rut=
-            clean_url = full_url.split("&rut=")[0]
+            clean_url = full_url.split("&rut=")[0]  # Remove tracker
 
             text = a.get_text().strip()
-            if 'price' in text.lower() or '₹' in text or '$' in text:
+            if '₹' in text:  # Only include INR prices
                 results.append({
                     "title": text,
                     "url": clean_url
@@ -43,7 +45,7 @@ def scrape():
 
     return jsonify({
         "product": query,
-        "results": results[:5]
+        "results": results[:5] if results else "No INR prices found"
     })
 
 if __name__ == '__main__':
