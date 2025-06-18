@@ -6,7 +6,7 @@ import re
 
 app = Flask(__name__)
 
-# ✅ Smarter price extractor for common Indian e-commerce sites
+# Function to extract price from product page HTML
 def extract_price_from_url(url):
     try:
         headers = {
@@ -15,32 +15,21 @@ def extract_price_from_url(url):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # 🔍 Amazon
-        price = soup.select_one('#priceblock_ourprice') or \
-                soup.select_one('#priceblock_dealprice') or \
-                soup.select_one('.a-price .a-offscreen')
-        if price:
-            return price.get_text(strip=True)
-
-        # 🔍 Flipkart
-        price = soup.select_one('._30jeq3._16Jk6d')
-        if price:
-            return price.get_text(strip=True)
-
-        # 🔍 Croma
-        price = soup.select_one('.pdpPrice')
-        if price:
-            return price.get_text(strip=True)
-
-        # 🔍 Universal ₹ fallback
+        # Method 1: Scan all raw text
         price_text = soup.get_text()
         prices = re.findall(r'₹\s?[0-9,]+', price_text)
         if prices:
             return prices[0]
 
-        return "Price not found"
+        # Method 2: Scan visible HTML tags
+        for tag in soup.select('span, div, p'):
+            if tag and tag.get_text():
+                match = re.search(r'₹\s?[0-9,]+', tag.get_text())
+                if match:
+                    return match.group()
 
-    except Exception:
+        return "Price not found"
+    except Exception as e:
         return "Error fetching"
 
 @app.route('/')
@@ -50,7 +39,7 @@ def home():
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
-    query = data.get('query') or data.get('product')
+    query = data.get('query')
 
     if not query:
         return jsonify({'error': 'Query required'}), 400
@@ -59,8 +48,8 @@ def scrape():
         "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
     }
 
-    duckduck_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    res = requests.get(duckduck_url, headers=headers, timeout=5)
+    search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    res = requests.get(search_url, headers=headers, timeout=5)
     soup = BeautifulSoup(res.text, "html.parser")
 
     results = []
@@ -71,7 +60,8 @@ def scrape():
             clean_url = full_url.split("&rut=")[0]
             text = a.get_text().strip()
 
-            if '₹' in text or 'price' in text.lower() or '$' in text:
+            # ✅ Only use trusted e-commerce sites
+            if any(domain in clean_url for domain in ['amazon', 'flipkart', 'reliance', 'croma']):
                 price = extract_price_from_url(clean_url)
                 results.append({
                     "title": text,
