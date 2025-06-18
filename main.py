@@ -6,19 +6,8 @@ import re
 
 app = Flask(__name__)
 
-# ✅ List of trusted ecommerce domains
-trusted_domains = [
-    "flipkart.com",
-    "amazon.",
-    "croma.com",
-    "reliancedigital.in"
-]
-
-# 🔍 Extract price from valid product URL
+# Function to extract price from product page HTML
 def extract_price_from_url(url):
-    if not any(domain in url for domain in trusted_domains):
-        return "Unsupported site"
-
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
@@ -26,21 +15,20 @@ def extract_price_from_url(url):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # Scan visible text for ₹ price pattern
+        # Look for ₹ pattern in entire text
         price_text = soup.get_text()
         prices = re.findall(r'₹\s?[0-9,]+', price_text)
 
         if prices:
-            return prices[0]
+            return prices[0]  # Return first match
         else:
             return "Price not found"
-
-    except Exception as e:
+    except Exception:
         return "Error fetching"
 
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Phase 3 Final) is live and filtered!"
+    return "🔥 CreativeScraper (Final Version) is Live!"
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
@@ -54,9 +42,9 @@ def scrape():
         "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
     }
 
-    # DuckDuckGo Search
-    ddg_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    res = requests.get(ddg_url, headers=headers, timeout=5)
+    # DuckDuckGo HTML search
+    search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    res = requests.get(search_url, headers=headers, timeout=5)
     soup = BeautifulSoup(res.text, "html.parser")
 
     results = []
@@ -68,8 +56,8 @@ def scrape():
             clean_url = full_url.split("&rut=")[0]
             text = a.get_text().strip()
 
-            # ✅ Filter by supported domain
-            if any(domain in clean_url for domain in trusted_domains):
+            # Basic filter: only process if text seems price-related
+            if '₹' in text or 'price' in text.lower() or '$' in text or 'rs' in text.lower():
                 price = extract_price_from_url(clean_url)
                 results.append({
                     "title": text,
@@ -79,7 +67,7 @@ def scrape():
 
     return jsonify({
         "product": query,
-        "results": results[:5]  # Limit to top 5
+        "results": results[:5]
     })
 
 if __name__ == '__main__':
