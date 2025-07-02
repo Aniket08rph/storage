@@ -101,6 +101,13 @@ async function main() {
   // HTTP Server
   const app = await httpServer(shutdownSignal.signal)
 
+  // 🔁 Keep Render app awake every 14 minutes
+setInterval(() => {
+  fetch('https://creative-scraper.onrender.com/status')
+    .then((res) => console.log('✅ Keep-alive ping:', res.status))
+    .catch((err) => console.error('❌ Keep-alive error:', err.message))
+}, 14 * 60 * 1000)
+  
   // HTTP Admin Server
   if (isMultitenant) {
     await httpAdminServer(app, shutdownSignal.signal)
