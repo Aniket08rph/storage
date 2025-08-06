@@ -48,7 +48,9 @@ def scrape():
     results = []
     for a in soup.find_all('a', href=True):
         href = a['href']
-        if "/l/?" in href and "uddg=" in href:
+
+        # FIXED ONLY THIS LINE, REST SAME
+        if "uddg=" in href:
             full_url = unquote(href.split("uddg=")[-1])
             clean_url = full_url.split("&rut=")[0]
             text = a.get_text().strip()
