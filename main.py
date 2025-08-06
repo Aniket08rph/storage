@@ -70,14 +70,18 @@ def scrape():
     }
 
     # Rotate search engines
+final_results = []
+
     for url in get_search_engines(query):
         try:
             res = requests.get(url, headers=headers, timeout=5)
             soup = BeautifulSoup(res.text, "html.parser")
             raw_links = extract_links(soup)
 
-            final_results = []
             for text, clean_url in raw_links:
+                if len(final_results) >= 10:
+                    break  # stop at 10 results max
+
                 price = extract_price_from_url(clean_url)
 
                 if price not in ["Price not found", "Error fetching"]:
@@ -86,21 +90,23 @@ def scrape():
                         "url": clean_url,
                         "price": price
                     })
-                if len(final_results) >= 5:
-                    break
-
-            if final_results:
-                return jsonify({
-                    "product": query,
-                    "results": final_results
-                })
 
         except Exception:
-            continue  # Try next search engine
+            continue  # move to next search engine
 
-    return jsonify({
-        "error": "All sources failed. Try again later."
-    }), 500
+        if len(final_results) >= 10:
+            break  # stop trying other engines if we already got 10
+
+    if len(final_results) >= 5:
+        return jsonify({
+            "product": query,
+            "results": final_results[:10]  # max 10
+        })
+    else:
+        return jsonify({
+            "error": "Not enough valid results found.",
+            "results_found": len(final_results)
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
