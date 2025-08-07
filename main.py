@@ -8,7 +8,6 @@ import time
 
 app = Flask(__name__)
 
-# Rotate user agents
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0)",
@@ -36,7 +35,6 @@ def extract_price_from_url(url):
 def home():
     return "✅ CreativeScraper (Brave Default + Rotation) Running!"
 
-# Rotating engines (Brave first)
 def get_search_engines(query):
     encoded = query.replace(' ', '+')
     return [
@@ -46,22 +44,31 @@ def get_search_engines(query):
         f"https://yep.com/search?q={encoded}"
     ]
 
-# Extract links from search results
+# Improved link extraction
 def extract_links(soup):
     results = []
+    seen_urls = set()
+
     for a in soup.find_all('a', href=True):
         href = a['href']
         text = a.get_text().strip()
 
-        if "http" in href:
-            full_url = unquote(href)
-        elif "uddg=" in href:
-            full_url = unquote(href.split("uddg=")[-1])
+        # Clean URL
+        if "uddg=" in href:
+            url = unquote(href.split("uddg=")[-1])
+        elif href.startswith("http") and not any(x in href for x in ["#","/settings", "/feedback", "/images"]):
+            url = href
         else:
             continue
 
-        if any(x in text.lower() for x in ['₹', 'price', '$', 'rs']):
-            results.append((text, full_url))
+        # Filter duplicate and junk URLs
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        # Only accept links with price-related keywords
+        if any(word in text.lower() for word in ['₹', 'price', '$', 'rs']):
+            results.append((text, url))
 
     return results
 
@@ -93,11 +100,13 @@ def scrape():
                         "price": price
                     })
 
-        except Exception as e:
+                time.sleep(0.3)  # optional delay to avoid fast requests
+
+        except Exception:
             continue
 
         if len(final_results) >= 5:
-            break  # Got enough
+            break
 
     if final_results:
         return jsonify({
@@ -108,7 +117,7 @@ def scrape():
         return jsonify({
             "product": query,
             "results": [],
-            "error": "Not enough valid results found. Try more common product keywords."
+            "error": "Not enough valid results found. Try a more specific product name."
         }), 500
 
 if __name__ == '__main__':
