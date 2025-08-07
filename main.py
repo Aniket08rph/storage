@@ -4,57 +4,65 @@ from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re
 import random
+import time
 
 app = Flask(__name__)
 
-# Function to extract price from a product page
+# Rotate user agents
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0)",
+    "Mozilla/5.0 (Linux; Android 10)",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)"
+]
+
+def get_random_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS)
+    }
+
+# Extract price from product page
 def extract_price_from_url(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-        }
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=get_random_headers(), timeout=6)
         soup = BeautifulSoup(res.text, 'html.parser')
-
-        price_text = soup.get_text()
-        prices = re.findall(r'₹\s?[0-9,]+', price_text)
-        if prices:
-            return prices[0]
-        return "Price not found"
-
+        text = soup.get_text()
+        prices = re.findall(r'₹\s?[0-9,]+', text)
+        return prices[0] if prices else "Price not found"
     except Exception:
         return "Error fetching"
 
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Phase 3 Rotating) is running!"
+    return "✅ CreativeScraper (Brave Default + Rotation) Running!"
 
-# === Utility: Search Engines ===
+# Rotating engines (Brave first)
 def get_search_engines(query):
+    encoded = query.replace(' ', '+')
     return [
-        f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}",
-        f"https://www.startpage.com/do/search?query={query.replace(' ', '+')}",
-        f"https://lite.qwant.com/?q={query.replace(' ', '+')}",
-        f"https://yep.com/search?q={query.replace(' ', '+')}",
+        f"https://search.brave.com/search?q={encoded}",
+        f"https://www.startpage.com/do/search?query={encoded}",
+        f"https://lite.qwant.com/?q={encoded}",
+        f"https://yep.com/search?q={encoded}"
     ]
 
-# === Utility: Clean URL extraction ===
+# Extract links from search results
 def extract_links(soup):
     results = []
     for a in soup.find_all('a', href=True):
         href = a['href']
         text = a.get_text().strip()
 
-        # Try to extract direct URL
-        if "uddg=" in href:
+        if "http" in href:
+            full_url = unquote(href)
+        elif "uddg=" in href:
             full_url = unquote(href.split("uddg=")[-1])
-        elif href.startswith("http"):
-            full_url = href
         else:
             continue
 
-        if '₹' in text or 'price' in text.lower() or '$' in text or 'rs' in text.lower():
+        if any(x in text.lower() for x in ['₹', 'price', '$', 'rs']):
             results.append((text, full_url))
+
     return results
 
 @app.route('/scrape', methods=['POST'])
@@ -65,47 +73,42 @@ def scrape():
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-    }
+    final_results = []
 
-    final_results = []  # ✅ FIXED: correctly indented inside the function
-
-    # Rotate search engines
-    for url in get_search_engines(query):
+    for engine_url in get_search_engines(query):
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(engine_url, headers=get_random_headers(), timeout=6)
             soup = BeautifulSoup(res.text, "html.parser")
-            raw_links = extract_links(soup)
+            links = extract_links(soup)
 
-            for text, clean_url in raw_links:
+            for text, link in links:
                 if len(final_results) >= 10:
-                    break  # stop at 10 results max
+                    break
 
-                price = extract_price_from_url(clean_url)
-
+                price = extract_price_from_url(link)
                 if price not in ["Price not found", "Error fetching"]:
                     final_results.append({
                         "title": text,
-                        "url": clean_url,
+                        "url": link,
                         "price": price
                     })
 
-        except Exception:
-            continue  # move to next search engine
+        except Exception as e:
+            continue
 
-        if len(final_results) >= 10:
-            break  # stop trying other engines if we already got 10
+        if len(final_results) >= 5:
+            break  # Got enough
 
-    if len(final_results) >= 5:
+    if final_results:
         return jsonify({
             "product": query,
-            "results": final_results[:10]  # max 10
+            "results": final_results[:10]
         })
     else:
         return jsonify({
-            "error": "Not enough valid results found.",
-            "results_found": len(final_results)
+            "product": query,
+            "results": [],
+            "error": "Not enough valid results found. Try more common product keywords."
         }), 500
 
 if __name__ == '__main__':
