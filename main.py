@@ -69,9 +69,9 @@ def scrape():
         "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
     }
 
-    # Rotate search engines
-final_results = []
+    final_results = []  # ✅ FIXED: correctly indented inside the function
 
+    # Rotate search engines
     for url in get_search_engines(query):
         try:
             res = requests.get(url, headers=headers, timeout=5)
