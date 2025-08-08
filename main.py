@@ -34,7 +34,7 @@ def extract_price_from_url(url):
 # Search engine URLs (HTML-friendly)
 # -----------------------------
 SEARCH_ENGINES = {
-    "duckduckgo": "https://html.duckduckgo.com/html/?q={query}",
+    "bing": "https://www.bing.com/search?q={query}",
     "brave": "https://search.brave.com/search?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
 }
@@ -42,7 +42,7 @@ SEARCH_ENGINES = {
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Multi-Engine) is running!"
+    return "🔥 CreativeScraper (Multi-Engine - Bing primary) is running!"
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
