@@ -52,6 +52,9 @@ def scrape():
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
+    # Automatically make it India-focused
+    search_query = f"{query} Buy in India"
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
     }
@@ -61,7 +64,7 @@ def scrape():
 
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
-            search_url = engine_url.format(query=query.replace(' ', '+'))
+            search_url = engine_url.format(query=search_query.replace(' ', '+'))
             res = requests.get(search_url, headers=headers, timeout=5)
             soup = BeautifulSoup(res.text, "html.parser")
 
@@ -104,7 +107,7 @@ def scrape():
             continue
 
     return jsonify({
-        "product": query,
+        "product": search_query,
         "results": results[:10]  # Max 10 results
     })
 
