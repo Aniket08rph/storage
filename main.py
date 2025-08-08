@@ -1,12 +1,15 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re
 import random
 import logging
+import time
 
 app = Flask(__name__)
+CORS(app)  # ✅ Allow all origins to call API
 
 # -----------------------------
 # Logging setup
@@ -20,26 +23,19 @@ USER_AGENTS = [
     # Desktop Chrome
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-
     # macOS Safari
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-
     # Android Chrome
     "Mozilla/5.0 (Linux; Android 11; SM-A107F) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36",
-
     # iPhone Safari
     "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/14.0 Mobile/15A372 Safari/604.1",
-
     # Firefox for Android
     "Mozilla/5.0 (Android 11; Mobile; rv:109.0) Gecko/109.0 Firefox/109.0"
 ]
 
-# -----------------------------
-# Helper functions
-# -----------------------------
 def get_random_headers():
     """Return headers with a random realistic User-Agent."""
     return {
@@ -50,16 +46,14 @@ def get_random_headers():
     }
 
 def normalize_query(query: str) -> str:
-    """Clean extra spaces, trim, and make safe for URLs."""
     return "+".join(query.strip().split())
 
 def extract_price_from_text(text: str):
-    """Find the first price-like pattern in raw text."""
+    # Only Indian currency formats
     patterns = [
-        r'₹\s?[0-9,]+',   # Indian Rupee
-        r'Rs\.?\s?[0-9,]+',
-        r'INR\s?[0-9,]+',
-        r'\$[0-9,.]+'     # Dollar fallback
+        r'₹\s?[0-9,]+',       # Indian Rupee symbol
+        r'Rs\.?\s?[0-9,]+',   # Rs or Rs.
+        r'INR\s?[0-9,]+'      # INR
     ]
     for pattern in patterns:
         prices = re.findall(pattern, text)
@@ -68,7 +62,6 @@ def extract_price_from_text(text: str):
     return None
 
 def extract_price_from_url(url: str) -> str:
-    """Fetch page and try to extract price."""
     try:
         res = requests.get(url, headers=get_random_headers(), timeout=8)
         if res.status_code != 200:
@@ -81,24 +74,21 @@ def extract_price_from_url(url: str) -> str:
         return None
 
 def get_search_engines(query: str):
-    """Return a list of search engine URLs for the query."""
+    """Brave first, then fallbacks."""
     return [
+        f"https://search.brave.com/search?q={query}",
         f"https://www.startpage.com/do/search?query={query}",
         f"https://lite.qwant.com/?q={query}",
-        f"https://yep.com/search?q={query}",
-        f"https://search.brave.com/search?q={query}"
+        f"https://yep.com/search?q={query}"
     ]
 
 def extract_links(soup: BeautifulSoup):
-    """Extract product-related links from search engine HTML."""
     results = []
     seen_urls = set()
-
     for a in soup.find_all('a', href=True):
         href = a['href']
         text = a.get_text().strip()
 
-        # Normalize href
         if href.startswith("http"):
             url = href
         elif "uddg=" in href:
@@ -106,28 +96,22 @@ def extract_links(soup: BeautifulSoup):
         else:
             continue
 
-        # Avoid duplicates and irrelevant links
         if url in seen_urls or any(x in href for x in ["#", "/settings", "/feedback", "/images", "javascript:"]):
             continue
 
         seen_urls.add(url)
 
-        # Keep if price-related terms or numeric patterns exist
         if any(term in text.lower() for term in ['₹', 'price', 'rs', '$', 'buy']) or extract_price_from_text(text):
             results.append((text, url))
 
     return results
 
-# -----------------------------
-# Flask Routes
-# -----------------------------
 @app.route('/')
 def home():
     return jsonify({"status": "ok", "message": "Price scraper is running"})
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    """Main scraping endpoint."""
     try:
         data = request.get_json(force=True)
         query_raw = data.get('query', '')
@@ -151,7 +135,6 @@ def scrape():
 
                     price = extract_price_from_url(link)
                     if not price:
-                        # Try also extracting from the search result snippet itself
                         price = extract_price_from_text(text)
 
                     if price:
@@ -160,13 +143,11 @@ def scrape():
                             "url": link,
                             "price": price
                         })
-
+                if len(final_results) >= 5:
+                    break
             except Exception as e:
                 logging.error(f"Error with engine {engine_url}: {e}")
                 continue
-
-            if len(final_results) >= 5:
-                break
 
         if final_results:
             return jsonify({
@@ -184,8 +165,5 @@ def scrape():
         logging.exception("Unhandled error during scrape")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-# -----------------------------
-# Main
-# -----------------------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
