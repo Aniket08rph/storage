@@ -44,6 +44,10 @@ SEARCH_ENGINES = {
 def home():
     return "🔥 CreativeScraper (Multi-Engine - Bing primary) is running!"
 
+# ✅ Health check endpoint for UptimeRobot
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "ok"}), 200
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
