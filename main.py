@@ -44,10 +44,12 @@ SEARCH_ENGINES = {
 def home():
     return "🔥 CreativeScraper (Multi-Engine - Bing primary) is running!"
 
-# ✅ Health check endpoint for UptimeRobot
+# ✅ Health check endpoint
 @app.route('/ping')
 def ping():
     return jsonify({"status": "ok"}), 200
+
+
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
@@ -72,8 +74,22 @@ def scrape():
             res = requests.get(search_url, headers=headers, timeout=5)
             soup = BeautifulSoup(res.text, "html.parser")
 
-            for a in soup.find_all('a', href=True):
-                href = a['href']
+            # -------------------------
+            # Engine-specific selectors
+            # -------------------------
+            if engine_name == "bing":
+                anchors = soup.select("li.b_algo h2 a")
+            elif engine_name == "brave":
+                anchors = soup.select("a.result-title")
+            elif engine_name == "qwant":
+                anchors = soup.select("a[href]")
+            else:
+                anchors = soup.find_all("a", href=True)
+
+            for a in anchors:
+                href = a.get("href")
+                if not href:
+                    continue
 
                 # Try to extract real URLs from search engine redirects
                 if "uddg=" in href:
@@ -91,7 +107,7 @@ def scrape():
                     continue
                 seen_urls.add(clean_url)
 
-                # Basic filter
+                # Basic filter — only process if text mentions price/currency
                 if any(term in text.lower() for term in ['₹', 'price', '$', 'rs']):
                     price = extract_price_from_url(clean_url)
                     if price not in ["Price not found", "Error fetching"]:
@@ -107,13 +123,15 @@ def scrape():
             if len(results) >= 10:
                 break
 
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {engine_name}: {e}")
             continue
 
     return jsonify({
         "product": search_query,
         "results": results[:10]  # Max 10 results
     })
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
