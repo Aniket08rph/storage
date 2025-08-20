@@ -11,9 +11,7 @@ app = Flask(__name__)
 # -----------------------------
 def extract_price_from_url(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
 
@@ -31,7 +29,7 @@ def extract_price_from_url(url):
         return "Error fetching"
 
 # -----------------------------
-# Search engine URLs (HTML-friendly)
+# Search engine URLs
 # -----------------------------
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={query}",
@@ -44,7 +42,7 @@ SEARCH_ENGINES = {
 def home():
     return "🔥 CreativeScraper (Multi-Engine - Bing primary) is running!"
 
-# ✅ Health check endpoint
+# ✅ Health check
 @app.route('/ping')
 def ping():
     return jsonify({"status": "ok"}), 200
@@ -58,12 +56,9 @@ def scrape():
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
-    # Automatically make it India-focused
+    # Automatically India-focused
     search_query = f"{query} Buy in India"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
 
     results = []
     seen_urls = set()
@@ -78,11 +73,11 @@ def scrape():
             # Engine-specific selectors
             # -------------------------
             if engine_name == "bing":
-                anchors = soup.select("li.b_algo h2 a")
+                anchors = soup.select("li.b_algo h2 a")   # ✅ Bing
             elif engine_name == "brave":
-                anchors = soup.select("a.result-title")
+                anchors = soup.select("a.result-title")   # ✅ Brave
             elif engine_name == "qwant":
-                anchors = soup.select("a[href]")
+                anchors = soup.select("a[href]")          # Qwant fallback
             else:
                 anchors = soup.find_all("a", href=True)
 
@@ -91,7 +86,7 @@ def scrape():
                 if not href:
                     continue
 
-                # Try to extract real URLs from search engine redirects
+                # Extract real URLs
                 if "uddg=" in href:
                     full_url = unquote(href.split("uddg=")[-1])
                 elif href.startswith("http"):
@@ -100,19 +95,20 @@ def scrape():
                     continue
 
                 clean_url = full_url.split("&rut=")[0]
-                text = a.get_text().strip()
-
-                # Avoid duplicates
                 if clean_url in seen_urls:
                     continue
                 seen_urls.add(clean_url)
 
-                # Basic filter — only process if text mentions price/currency
-                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs']):
+                text = a.get_text().strip()
+
+                # Filter: must look like a product or have price/currency/domain
+                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs']) or any(
+                    d in clean_url for d in ["amazon", "flipkart", "croma"]
+                ):
                     price = extract_price_from_url(clean_url)
                     if price not in ["Price not found", "Error fetching"]:
                         results.append({
-                            "title": text,
+                            "title": text or clean_url,
                             "url": clean_url,
                             "price": price
                         })
@@ -129,7 +125,7 @@ def scrape():
 
     return jsonify({
         "product": search_query,
-        "results": results[:10]  # Max 10 results
+        "results": results[:10]
     })
 
 
