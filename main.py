@@ -3,13 +3,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from urllib.parse import unquote, urlparse, quote_plus
+from urllib.parse import unquote, urlparse, parse_qs, quote_plus
 import re, time, random, concurrent.futures
 
 app = Flask(__name__)
 
 # -----------------------------
-# Session with retries/backoff
+# Robust session (retries/backoff)
 # -----------------------------
 def make_session():
     s = requests.Session()
@@ -45,70 +45,92 @@ def default_headers():
     }
 
 # -----------------------------
-# Price extraction
+# Price extraction (selectors + regex)
 # -----------------------------
 CURRENCY_PATTERNS = [
-    r'₹\s?[\d,]+(?:\.\d+)?',      # INR
-    r'Rs\.?\s?[\d,]+',            # Rs
-    r'\$\s?[\d,]+(?:\.\d+)?',     # USD
+    r'₹\s?[\d,]+(?:\.\d+)?',
+    r'Rs\.?\s?[\d,]+(?:\.\d+)?',
+    r'\$\s?[\d,]+(?:\.\d+)?',
 ]
 
 SITE_PRICE_SELECTORS = {
-    # India-first sites
-    "amazon.in": ["#corePriceDisplay_desktop_feature_div .a-offscreen", ".a-price-whole", ".a-price .a-offscreen"],
+    "amazon.in": [
+        "#corePriceDisplay_desktop_feature_div .a-offscreen",
+        ".a-price .a-offscreen",
+        ".a-price-whole"
+    ],
     "flipkart.com": ["._30jeq3", "._16Jk6d"],
     "croma.com": [".pdp-price .amount", ".new-price .amount", ".pdpPrice"],
-    "reliancedigital.in": [".pdp__priceSection .pdp__offerPrice", ".pdp__finalPrice"],
+    "reliancedigital.in": [".pdp__offerPrice", ".pdp__finalPrice"],
     "tatacliq.com": [".ProductDescription__price", ".ProductDetails__price", ".price__value"],
     "vijaysales.com": [".our_price", ".offerPrice", ".product-price"],
     "snapdeal.com": [".payBlkBig", "#selling-price-id", ".final-price"],
     "moglix.com": [".prod-price", ".price span", ".amount"],
-    # Global fallback examples
     "ebay.in": ["#prcIsum", "#mm-saleDscPrc", ".notranslate"],
     "ebay.com": ["#prcIsum", "#mm-saleDscPrc", ".x-price-primary"],
     "aliexpress.com": [".product-price-value", ".product-price-current"],
 }
 
-def extract_price_from_html(url, html):
-    # Site-specific first
-    domain = urlparse(url).netloc.lower()
-    soup = BeautifulSoup(html, "html.parser")
-    for host, selectors in SITE_PRICE_SELECTORS.items():
-        if host in domain:
-            for sel in selectors:
-                el = soup.select_one(sel)
-                if el:
-                    text = el.get_text(" ", strip=True)
-                    m = _first_currency(text)
-                    if m:
-                        return m
-    # Generic text scan
-    text = soup.get_text(" ", strip=True)
-    return _first_currency(text)
+META_PRICE_HINTS = [
+    ('meta', {'property': 'product:price:amount'}),
+    ('meta', {'property': 'og:price:amount'}),
+    ('meta', {'itemprop': 'price'}),
+    ('span', {'itemprop': 'price'}),
+]
 
 def _first_currency(text):
+    if not text:
+        return None
     for pat in CURRENCY_PATTERNS:
         m = re.search(pat, text)
         if m:
             return m.group(0)
     return None
 
-def fetch_price(url, timeout=8):
+def extract_price_from_html(url, html):
+    domain = urlparse(url).netloc.lower()
+    soup = BeautifulSoup(html, "html.parser")
+
+    # meta hints
+    for tag, attrs in META_PRICE_HINTS:
+        el = soup.find(tag, attrs=attrs)
+        if el:
+            val = el.get("content") or el.get_text(" ", strip=True)
+            cur = _first_currency(val)
+            if cur:
+                return cur
+
+    # site-specific selectors
+    for host, selectors in SITE_PRICE_SELECTORS.items():
+        if host in domain:
+            for sel in selectors:
+                el = soup.select_one(sel)
+                if el:
+                    cur = _first_currency(el.get_text(" ", strip=True))
+                    if cur:
+                        return cur
+
+    # generic scan
+    text = soup.get_text(" ", strip=True)
+    return _first_currency(text)
+
+def extract_price_from_url(url, timeout=8):
     try:
         res = SESSION.get(url, headers=default_headers(), timeout=timeout)
-        if res.status_code != 200 or "text/html" not in res.headers.get("Content-Type",""):
-            return None
-        return extract_price_from_html(url, res.text)
+        if res.status_code != 200 or "text/html" not in res.headers.get("Content-Type", ""):
+            return "Price not found"
+        price = extract_price_from_html(url, res.text)
+        return price or "Price not found"
     except Exception:
-        return None
+        return "Error fetching"
 
 # -----------------------------
-# Search engines (no Yahoo)
+# Search engines (Yahoo removed, expanded list)
 # -----------------------------
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={query}",
-    "brave": "https://search.brave.com/search?q={query}",
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
+    "brave": "https://search.brave.com/search?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
     "mojeek": "https://www.mojeek.com/search?q={query}",
     "ecosia": "https://www.ecosia.org/search?q={query}",
@@ -119,87 +141,104 @@ SEARCH_ENGINES = {
 }
 
 # -----------------------------
-# Direct shopping site searches
-# (these often beat general search engines)
+# Shopping allow/block rules
 # -----------------------------
-SHOP_SEARCH_URLS = {
-    "amazon.in": "https://www.amazon.in/s?k={query}",
-    "flipkart.com": "https://www.flipkart.com/search?q={query}",
-    "croma.com": "https://www.croma.com/search/?text={query}",
-    "reliancedigital.in": "https://www.reliancedigital.in/search?q={query}",
-    "tatacliq.com": "https://www.tatacliq.com/search/?searchCategory=all&text={query}",
-    "vijaysales.com": "https://www.vijaysales.com/search/{query}",
-    "snapdeal.com": "https://www.snapdeal.com/search?keyword={query}",
-    "moglix.com": "https://www.moglix.com/search?query={query}",
-}
-
-# -----------------------------
-# Allow/Block rules
-# -----------------------------
-ALLOW_DOMAINS = set(SHOP_SEARCH_URLS.keys()) | {
-    "ebay.in", "ebay.com", "aliexpress.com", "shopclues.com", "paytmmall.com"
+ALLOW_DOMAINS = {
+    # India-first marketplaces & retailers
+    "amazon.in", "flipkart.com", "croma.com", "reliancedigital.in", "tatacliq.com",
+    "vijaysales.com", "snapdeal.com", "moglix.com", "shopclues.com", "paytmmall.com",
+    # Global marketplaces
+    "ebay.in", "ebay.com", "aliexpress.com"
 }
 BLOCKED_DOMAINS = {
     "news", "blog", "wikipedia", "youtube", "reddit", "facebook", "twitter",
-    "instagram", "quora", "medium", "x.com"
+    "instagram", "quora", "medium", "x.com", "linkedin", "pinterest", "gov"
 }
-ALLOW_PATH_HINTS = {"shop", "store", "buy", "product", "products", "cart", "checkout", "deal"}
+BLOCKED_EXT = (".pdf", ".doc", ".docx", ".ppt", ".xls", ".zip", ".rar")
+PATH_HINTS = {"shop", "store", "buy", "product", "products", "cart", "checkout", "deal", "p/"}
 
 def is_shopping_url(url):
-    netloc = urlparse(url).netloc.lower()
-    host = netloc.split(":")[0]
-    # allow if domain is in whitelist
-    if any(h in host for h in ALLOW_DOMAINS):
-        return True
-    # reject if obviously non-shopping
-    if any(bad in host for bad in BLOCKED_DOMAINS):
+    try:
+        u = urlparse(url)
+        if u.scheme not in ("http", "https"):
+            return False
+        if any(url.lower().endswith(ext) for ext in BLOCKED_EXT):
+            return False
+        host = u.netloc.lower()
+        if any(b in host for b in BLOCKED_DOMAINS):
+            return False
+        # strong allow
+        if any(h in host for h in ALLOW_DOMAINS):
+            return True
+        # path/query hints
+        path_q = (u.path + "?" + (u.query or "")).lower()
+        if any(h in path_q for h in PATH_HINTS):
+            return True
         return False
-    # path hints
-    path = urlparse(url).path.lower()
-    if any(hint in path for hint in ALLOW_PATH_HINTS):
-        return True
-    # query hints
-    qs = urlparse(url).query.lower()
-    if any(hint in qs for hint in ALLOW_PATH_HINTS):
-        return True
-    return False
+    except Exception:
+        return False
 
 def clean_outgoing_url(href):
+    """
+    Unwrap common SERP redirect patterns.
+    """
     if not href:
         return None
+
+    # Direct http(s)
+    if href.startswith("http://") or href.startswith("https://"):
+        return href.split("&rut=")[0]
+
+    # DDG style /l/?uddg=
     if "uddg=" in href:
         try:
             return unquote(href.split("uddg=")[-1].split("&")[0])
         except Exception:
             pass
-    if href.startswith("/url?") and "q=" in href:
-        # some engines wrap google-style
+
+    # Generic /url?url= /url?q= /redir?url=  /aclk?u=
+    if href.startswith("/") or href.startswith("?"):
         try:
-            return unquote(href.split("q=")[1].split("&")[0])
+            # fabricate absolute for parsing
+            p = urlparse("https://example.com" + href)
+            qs = parse_qs(p.query)
+            for key in ("url", "q", "u", "ru", "target"):
+                if key in qs:
+                    candidate = qs[key][0]
+                    if candidate.startswith("http"):
+                        return unquote(candidate)
         except Exception:
             pass
-    if href.startswith("http"):
-        return href.split("&rut=")[0]
+
     return None
 
-# -----------------------------
-# HTML listing parsing (very generic)
-# -----------------------------
 def extract_links(html):
     soup = BeautifulSoup(html, "html.parser")
-    out = []
+    links = []
     for a in soup.find_all("a", href=True):
         href = clean_outgoing_url(a["href"])
         if not href:
             continue
         title = a.get_text(" ", strip=True)[:200]
-        out.append((href, title))
-    return out
+        links.append((href, title))
+    return links
 
-def fetch_url(url, timeout=10):
+def normalize_key(url):
+    try:
+        u = urlparse(url)
+        base = f"{u.scheme}://{u.netloc}{u.path}"
+        return base.rstrip("/")
+    except Exception:
+        return url
+
+def fetch_html(url, timeout=10):
     try:
         r = SESSION.get(url, headers=default_headers(), timeout=timeout)
         if r.status_code != 200:
+            return None
+        # basic content-type check
+        ctype = r.headers.get("Content-Type", "")
+        if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
             return None
         return r.text
     except Exception:
@@ -208,106 +247,120 @@ def fetch_url(url, timeout=10):
 # -----------------------------
 # API routes
 # -----------------------------
-@app.route("/")
+@app.route('/')
 def home():
-    return "🔥 Savzaar CreativeScraper — Shopping-First Multi-Source is running!"
+    return "🔥 CreativeScraper (Shopping-First, Multi-Engine, Resilient) is running!"
 
-@app.route("/ping")
+# ✅ Health check endpoint for UptimeRobot
+@app.route('/ping')
 def ping():
     return jsonify({"status": "ok"}), 200
 
-@app.route("/scrape", methods=["POST"])
+@app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json or {}
-    query = data.get("query", "").strip()
+    query = (data.get('query') or "").strip()
     if not query:
-        return jsonify({"error": "Query required"}), 400
+        return jsonify({'error': 'Query required'}), 400
 
-    # India-centric wording kept
-    if "buy in india" not in query.lower():
-        search_query = f"{query} Buy in India"
-    else:
-        search_query = query
-
+    # India-shopping focus
+    search_query = query if "buy in india" in query.lower() else f"{query} Buy in India"
     encoded = quote_plus(search_query)
 
+    TARGET_MIN = 12          # aim for at least this many
+    MAX_COLLECT = 40         # hard cap
+    PER_ENGINE_LIMIT = 15    # per-engine soft cap
+    SLEEP_BETWEEN = 0.7      # throttle to avoid bans
+
     results = []
-    seen = set()  # dedupe by normalized URL
+    seen = set()
 
-    # 1) Direct shopping sites first (higher precision)
-    for host, tmpl in SHOP_SEARCH_URLS.items():
-        url = tmpl.format(query=encoded)
-        html = fetch_url(url)
+    # Collect from ALL engines (ordered by typical quality for shopping)
+    ordered_engines = [
+        "bing", "duckduckgo", "brave", "qwant", "mojeek", "ecosia", "startpage", "swisscows", "metager", "yep"
+    ]
+
+    for name in ordered_engines:
+        engine_url = SEARCH_ENGINES.get(name).format(query=encoded)
+        html = fetch_html(engine_url)
         if not html:
+            time.sleep(SLEEP_BETWEEN)
             continue
+
+        added_this_engine = 0
         for href, title in extract_links(html):
             if not is_shopping_url(href):
                 continue
-            key = normalize_key(href)
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append({"title": title or host, "url": href})
 
-    # 2) General search engines (recall + diversity)
-    for name, tmpl in SEARCH_ENGINES.items():
-        url = tmpl.format(query=encoded)
-        html = fetch_url(url)
-        if not html:
-            continue
-        for href, title in extract_links(html):
-            if not is_shopping_url(href):
-                continue
             key = normalize_key(href)
             if key in seen:
                 continue
+
             seen.add(key)
             results.append({"title": title or name, "url": href})
+            added_this_engine += 1
 
-    # 3) Fetch prices concurrently for top 25 collected
+            if len(results) >= MAX_COLLECT or added_this_engine >= PER_ENGINE_LIMIT:
+                break
+
+        # move to next engine regardless, but stop if we already have plenty
+        time.sleep(SLEEP_BETWEEN)
+        if len(results) >= TARGET_MIN:
+            # keep going lightly to add diversity but don't over-fetch
+            continue
+
+    # If still too few, allow more permissive pass (relax path hints but keep blocklists)
+    if len(results) < TARGET_MIN:
+        relaxed = []
+        for name in ordered_engines:
+            engine_url = SEARCH_ENGINES.get(name).format(query=encoded)
+            html = fetch_html(engine_url)
+            if not html:
+                continue
+            for href, title in extract_links(html):
+                try:
+                    u = urlparse(href)
+                    if u.scheme not in ("http", "https"):
+                        continue
+                    host = u.netloc.lower()
+                    if any(b in host for b in BLOCKED_DOMAINS):
+                        continue
+                    if host.endswith(".gov") or host.endswith(".edu"):
+                        continue
+                    key = normalize_key(href)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    relaxed.append({"title": title or name, "url": href})
+                    if len(results) + len(relaxed) >= TARGET_MIN:
+                        break
+                except Exception:
+                    continue
+            if len(results) + len(relaxed) >= TARGET_MIN:
+                break
+        results.extend(relaxed)
+
+    # Price fetch concurrently for top N
     top = results[:25]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        futs = {ex.submit(fetch_price, item["url"]): i for i, item in enumerate(top)}
-        for fut in concurrent.futures.as_completed(futs):
-            idx = futs[fut]
-            price = None
-            try:
-                price = fut.result()
-            except Exception:
+    if top:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futs = {ex.submit(extract_price_from_url, item["url"]): i for i, item in enumerate(top)}
+            for fut in concurrent.futures.as_completed(futs):
+                idx = futs[fut]
                 price = None
-            if price:
-                top[idx]["price"] = price
-
-    # 4) Basic ranking: sites in allowlist first, then others
-    def score(item):
-        host = urlparse(item["url"]).netloc.lower()
-        base = 0
-        if any(h in host for h in ALLOW_DOMAINS):
-            base += 5
-        if "price" in item.get("title","").lower():
-            base += 1
-        if "₹" in item.get("title",""):
-            base += 2
-        if item.get("price"):
-            base += 3
-        return -base  # sort asc -> highest score first
-
-    top.sort(key=score)
+                try:
+                    price = fut.result()
+                except Exception:
+                    price = None
+                if price and price not in ("Price not found", "Error fetching"):
+                    top[idx]["price"] = price
 
     final = top[:20] if top else [{"error": "No shopping results found"}]
-    return jsonify({"product": search_query, "results": final})
+    return jsonify({
+        "product": search_query,
+        "results": final
+    })
 
-# -----------------------------
-# Utils
-# -----------------------------
-def normalize_key(url):
-    try:
-        u = urlparse(url)
-        # strip tracking params
-        base = f"{u.scheme}://{u.netloc}{u.path}"
-        return base.rstrip("/")
-    except Exception:
-        return url
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
+```0
