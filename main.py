@@ -76,7 +76,7 @@ def scrape():
     results = []
     seen_urls = set()
 
-    # Loop through ALL engines until we gather at least 10 results
+    # ✅ Loop through ALL engines until we gather at least 12 valid shopping results
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
             search_url = engine_url.format(query=search_query.replace(' ', '+'))
@@ -123,7 +123,7 @@ def scrape():
                 if len(results) >= 12:  # stop if buffer > 10 found
                     break
 
-            # ✅ NOTICE: do NOT break outer loop
+            # ✅ don't break outer loop, continue other engines
             if len(results) >= 12:
                 break
 
@@ -136,3 +136,6 @@ def scrape():
         "product": search_query,
         "results": results[:10] if results else [{"error": "No shopping results found"}]
     })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
