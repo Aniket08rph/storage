@@ -30,14 +30,13 @@ def extract_price_from_url(url):
         return None
 
 # -----------------------------
-# Search engine URLs (HTML-friendly)
+# Search engine URLs (Yahoo removed, reordered for quality)
 # -----------------------------
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={query}",
     "brave": "https://search.brave.com/search?q={query}",
-    "qwant": "https://lite.qwant.com/?q={query}",
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
-    "yahoo": "https://search.yahoo.com/search?p={query}",
+    "qwant": "https://lite.qwant.com/?q={query}",
     "mojeek": "https://www.mojeek.com/search?q={query}",
     "yep": "https://yep.com/web?q={query}"
 }
@@ -76,7 +75,7 @@ def scrape():
     results = []
     seen_urls = set()
 
-    # ✅ Loop through ALL engines until we gather at least 12 valid shopping results
+    # ✅ Collect from ALL engines
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
             search_url = engine_url.format(query=search_query.replace(' ', '+'))
@@ -100,7 +99,7 @@ def scrape():
                 clean_url = full_url.split("&rut=")[0]
                 text = a.get_text().strip()
 
-                # Skip bad URLs
+                # Skip duplicates & junk
                 if clean_url in seen_urls or not text:
                     continue
                 if any(bad in clean_url.lower() for bad in BLOCKED_DOMAINS):
@@ -120,21 +119,18 @@ def scrape():
                     result_item["price"] = price
                 results.append(result_item)
 
-                if len(results) >= 12:  # stop if buffer > 10 found
+                if len(results) >= 20:  # ✅ collect more since all engines are used
                     break
 
-            # ✅ don't break outer loop, continue other engines
-            if len(results) >= 12:
-                break
+            # small pause between engines
+            time.sleep(1)
 
         except Exception:
             continue
 
-        time.sleep(1)  # small pause to avoid blocks
-
     return jsonify({
         "product": search_query,
-        "results": results[:10] if results else [{"error": "No shopping results found"}]
+        "results": results[:15] if results else [{"error": "No shopping results found"}]
     })
 
 if __name__ == '__main__':
