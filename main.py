@@ -2,142 +2,126 @@ from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-import re, time
+import re
 
-app = Flask(__name__)
+app = Flask(name)
 
-# -----------------------------
-# Function to extract price from a product page
-# -----------------------------
+-----------------------------
+
+Function to extract price from a product page
+
+-----------------------------
+
 def extract_price_from_url(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
-        res = requests.get(url, headers=headers, timeout=6)
-        if res.status_code != 200:
-            return None
-        soup = BeautifulSoup(res.text, 'html.parser')
+try:
+headers = {
+"User-Agent": "Mozilla/5.0 (Linux; Android 10)"
+}
+res = requests.get(url, headers=headers, timeout=5)
+soup = BeautifulSoup(res.text, 'html.parser')
 
-        # Extract ₹, Rs, or $
-        price_text = soup.get_text()
-        patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
-        for pattern in patterns:
-            prices = re.findall(pattern, price_text)
-            if prices:
-                return prices[0]
+# Extract ₹, Rs, or $ prices  
+    price_text = soup.get_text()  
+    patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']  
+    for pattern in patterns:  
+        prices = re.findall(pattern, price_text)  
+        if prices:  
+            return prices[0]  
 
-        return None
-    except Exception:
-        return None
+    return "Price not found"  
 
-# -----------------------------
-# Expanded Search engine URLs
-# -----------------------------
+except Exception:  
+    return "Error fetching"
+
+-----------------------------
+
+Search engine URLs (HTML-friendly)
+
+-----------------------------
+
 SEARCH_ENGINES = {
-    "bing": "https://www.bing.com/search?q={query}",
-    "brave": "https://search.brave.com/search?q={query}",
-    "duckduckgo": "https://duckduckgo.com/html/?q={query}",
-    "qwant": "https://lite.qwant.com/?q={query}",
-    "mojeek": "https://www.mojeek.com/search?q={query}",
-    "yep": "https://yep.com/web?q={query}",
-    "ecosia": "https://www.ecosia.org/search?q={query}",
-    "startpage": "https://www.startpage.com/do/dsearch?query={query}",
-    "swisscows": "https://swisscows.com/web?query={query}",
-    "metager": "https://metager.org/meta/meta.ger3?eingabe={query}"
+"bing": "https://www.bing.com/search?q={query}",
+"brave": "https://search.brave.com/search?q={query}",
+"qwant": "https://lite.qwant.com/?q={query}",
 }
 
-# Strong shopping site filter (India focused + global)
-SHOPPING_KEYWORDS = [
-    "amazon", "flipkart", "croma", "reliancedigital", "snapdeal",
-    "tatacliq", "shop", "store", "buy", "cart", "checkout", "deal", "product"
-]
+-----------------------------
 
-# Block junk / non-shopping
-BLOCKED_DOMAINS = [
-    "news", "blog", "wikipedia", "youtube", "reddit", "facebook", "twitter", "instagram", "quora"
-]
-
-# -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Multi-Engine Shopping Edition, Full Loop) is running!"
+return "🔥 CreativeScraper (Multi-Engine - Bing primary) is running!"
+
+✅ Health check endpoint for UptimeRobot
 
 @app.route('/ping')
 def ping():
-    return jsonify({"status": "ok"}), 200
-
+return jsonify({"status": "ok"}), 200
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    data = request.json
-    query = data.get('query')
+data = request.json
+query = data.get('query')
 
-    if not query:
-        return jsonify({'error': 'Query required'}), 400
+if not query:  
+    return jsonify({'error': 'Query required'}), 400  
 
-    # Ensure India shopping focus
-    if "buy in india" not in query.lower():
-        search_query = f"{query} Buy in India"
-    else:
-        search_query = query
+# Automatically make it India-focused  
+search_query = f"{query} Buy in India"  
 
-    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
+headers = {  
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10)"  
+}  
 
-    results = []
-    seen_urls = set()
+results = []  
+seen_urls = set()  
 
-    # ✅ Loop through ALL engines (no early break)
-    for engine_name, engine_url in SEARCH_ENGINES.items():
-        try:
-            search_url = engine_url.format(query=search_query.replace(' ', '+'))
-            res = requests.get(search_url, headers=headers, timeout=10)
-            if res.status_code != 200:
-                continue
+for engine_name, engine_url in SEARCH_ENGINES.items():  
+    try:  
+        search_url = engine_url.format(query=search_query.replace(' ', '+'))  
+        res = requests.get(search_url, headers=headers, timeout=5)  
+        soup = BeautifulSoup(res.text, "html.parser")  
 
-            soup = BeautifulSoup(res.text, "html.parser")
+        for a in soup.find_all('a', href=True):  
+            href = a['href']  
 
-            for a in soup.find_all('a', href=True):
-                href = a['href']
+            # Try to extract real URLs from search engine redirects  
+            if "uddg=" in href:  
+                full_url = unquote(href.split("uddg=")[-1])  
+            elif href.startswith("http"):  
+                full_url = href  
+            else:  
+                continue  
 
-                # Extract clean URL
-                if "uddg=" in href:
-                    full_url = unquote(href.split("uddg=")[-1])
-                elif href.startswith("http"):
-                    full_url = href
-                else:
-                    continue
+            clean_url = full_url.split("&rut=")[0]  
+            text = a.get_text().strip()  
 
-                clean_url = full_url.split("&rut=")[0]
-                text = a.get_text().strip()
+            # Avoid duplicates  
+            if clean_url in seen_urls:  
+                continue  
+            seen_urls.add(clean_url)  
 
-                # Skip duplicates & junk
-                if clean_url in seen_urls or not text:
-                    continue
-                if any(bad in clean_url.lower() for bad in BLOCKED_DOMAINS):
-                    continue
+            # Basic filter  
+            if any(term in text.lower() for term in ['₹', 'price', '$', 'rs']):  
+                price = extract_price_from_url(clean_url)  
+                if price not in ["Price not found", "Error fetching"]:  
+                    results.append({  
+                        "title": text,  
+                        "url": clean_url,  
+                        "price": price  
+                    })  
 
-                # ✅ Only allow shopping sites
-                if not any(word in clean_url.lower() for word in SHOPPING_KEYWORDS):
-                    continue
+            if len(results) >= 10:  
+                break  
 
-                seen_urls.add(clean_url)
+        if len(results) >= 10:  
+            break  
 
-                # Try to fetch price
-                price = extract_price_from_url(clean_url)
+    except Exception:  
+        continue  
 
-                result_item = {"title": text, "url": clean_url}
-                if price:
-                    result_item["price"] = price
-                results.append(result_item)
+return jsonify({  
+    "product": search_query,  
+    "results": results[:10]  # Max 10 results  
+})
 
-            # small pause between engines
-            time.sleep(1)
-
-        except Exception:
-            continue
-
-    return jsonify({
-        "product": search_query,
-        "results": results[:25] if results else [{"error": "No shopping results found"}]
-    })
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+if name == 'main':
+app.run(host='0.0.0.0', port=8080)
