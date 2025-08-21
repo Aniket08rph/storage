@@ -30,7 +30,7 @@ def extract_price_from_url(url):
         return None
 
 # -----------------------------
-# Search engine URLs (Yahoo removed, reordered for quality)
+# Expanded Search engine URLs
 # -----------------------------
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={query}",
@@ -38,19 +38,28 @@ SEARCH_ENGINES = {
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
     "mojeek": "https://www.mojeek.com/search?q={query}",
-    "yep": "https://yep.com/web?q={query}"
+    "yep": "https://yep.com/web?q={query}",
+    "ecosia": "https://www.ecosia.org/search?q={query}",
+    "startpage": "https://www.startpage.com/do/dsearch?query={query}",
+    "swisscows": "https://swisscows.com/web?query={query}",
+    "metager": "https://metager.org/meta/meta.ger3?eingabe={query}"
 }
 
-# Shopping site keyword allow-list
-SHOPPING_KEYWORDS = ["shop", "store", "buy", "product", "cart", "checkout", "deal"]
+# Strong shopping site filter (India focused + global)
+SHOPPING_KEYWORDS = [
+    "amazon", "flipkart", "croma", "reliancedigital", "snapdeal",
+    "tatacliq", "shop", "store", "buy", "cart", "checkout", "deal", "product"
+]
 
-# Block non-shopping domains
-BLOCKED_DOMAINS = ["news", "blog", "wikipedia", "youtube", "reddit", "facebook"]
+# Block junk / non-shopping
+BLOCKED_DOMAINS = [
+    "news", "blog", "wikipedia", "youtube", "reddit", "facebook", "twitter", "instagram", "quora"
+]
 
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Multi-Engine Shopping Edition) is running!"
+    return "🔥 CreativeScraper (Multi-Engine Shopping Edition, Full Loop) is running!"
 
 @app.route('/ping')
 def ping():
@@ -75,11 +84,11 @@ def scrape():
     results = []
     seen_urls = set()
 
-    # ✅ Collect from ALL engines
+    # ✅ Loop through ALL engines (no early break)
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
             search_url = engine_url.format(query=search_query.replace(' ', '+'))
-            res = requests.get(search_url, headers=headers, timeout=8)
+            res = requests.get(search_url, headers=headers, timeout=10)
             if res.status_code != 200:
                 continue
 
@@ -105,7 +114,7 @@ def scrape():
                 if any(bad in clean_url.lower() for bad in BLOCKED_DOMAINS):
                     continue
 
-                # Only allow shopping-like URLs
+                # ✅ Only allow shopping sites
                 if not any(word in clean_url.lower() for word in SHOPPING_KEYWORDS):
                     continue
 
@@ -119,9 +128,6 @@ def scrape():
                     result_item["price"] = price
                 results.append(result_item)
 
-                if len(results) >= 20:  # ✅ collect more since all engines are used
-                    break
-
             # small pause between engines
             time.sleep(1)
 
@@ -130,7 +136,7 @@ def scrape():
 
     return jsonify({
         "product": search_query,
-        "results": results[:15] if results else [{"error": "No shopping results found"}]
+        "results": results[:25] if results else [{"error": "No shopping results found"}]
     })
 
 if __name__ == '__main__':
