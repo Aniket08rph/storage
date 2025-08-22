@@ -55,7 +55,7 @@ SEARCH_ENGINES = {
 def home():
     return "🔥 AI Shopping Scraper (Multi-Engine, Anti-block) is running!"
 
-✅ Health check endpoint for UptimeRobot
+#✅ Health check endpoint for UptimeRobot
 
 @app.route('/ping')
 def ping():
