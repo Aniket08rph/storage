@@ -8,9 +8,9 @@ import re, time, random, concurrent.futures
 
 app = Flask(__name__)
 
-# -----------------------------
-# Robust session with retries
-# -----------------------------
+# --------------------
+# Robust session
+# --------------------
 def make_session():
     s = requests.Session()
     retry = Retry(
@@ -26,50 +26,38 @@ def make_session():
 
 SESSION = make_session()
 
-# -----------------------------
-# UAs + headers (more realistic)
-# -----------------------------
+# --------------------
+# Headers
+# --------------------
 UAS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
 ]
-
 def default_headers():
-    ua = random.choice(UAS)
     return {
-        "User-Agent": ua,
+        "User-Agent": random.choice(UAS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-IN,en;q=0.9",
-        "Referer": "https://www.google.com/",
-        "Connection": "keep-alive",
-        "Sec-Ch-Ua": '"Chromium";v="124", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Connection": "close",
     }
 
-# -----------------------------
+# --------------------
 # Price extraction
-# -----------------------------
+# --------------------
 CURRENCY_PATTERNS = [
     r'₹\s?[\d,]+(?:\.\d+)?',
-    r'Rs\.?\s?[\d,]+(?:\.\d+)?',
+    r'Rs.?\s?[\d,]+(?:\.\d+)?',
     r'\$\s?[\d,]+(?:\.\d+)?'
 ]
 
 SITE_SELECTORS = {
-    "amazon.in": [
-        ".a-price .a-offscreen",
-        "#corePriceDisplay_desktop_feature_div .a-offscreen",
-        ".apexPriceToPay .a-offscreen"
-    ],
-    "flipkart.com": [
-        "._30jeq3", "._1vC4OE", "._16Jk6d"
-    ],
-    "croma.com": [".pdp-price .amount", ".amount-price"],
+    "amazon.in": [".a-price .a-offscreen", "#corePriceDisplay_desktop_feature_div .a-offscreen"],
+    "flipkart.com": ["._30jeq3", "._1vC4OE"],
+    "croma.com": [".pdp-price .amount"],
     "reliancedigital.in": [".pdp__finalPrice", ".price"],
-    "tatacliq.com": [".price__value", ".ProductDetailsMainPrice__price"]
+    "tatacliq.com": [".price__value"],
+    "snapdeal.com": [".payBlkBig"],
 }
 
 def _first_currency(text):
@@ -85,7 +73,7 @@ def extract_price_from_html(url, html):
     domain = urlparse(url).netloc.lower()
     soup = BeautifulSoup(html, "html.parser")
 
-    # site-specific selectors
+    # Site-specific selectors
     for host, selectors in SITE_SELECTORS.items():
         if host in domain:
             for sel in selectors:
@@ -95,7 +83,7 @@ def extract_price_from_html(url, html):
                     if cur:
                         return cur
 
-    # meta tags quick check
+    # Meta tags
     metas = soup.find_all("meta")
     for m in metas:
         if m.get("property", "").lower().endswith("price:amount") or m.get("itemprop") == "price":
@@ -104,10 +92,10 @@ def extract_price_from_html(url, html):
             if cur:
                 return cur
 
-    # fallback: whole-page text scan
+    # Fallback
     return _first_currency(soup.get_text(" ", strip=True))
 
-def extract_price_from_url(url, timeout=8):
+def extract_price_from_url(url, timeout=7):
     try:
         r = SESSION.get(url, headers=default_headers(), timeout=timeout)
         if r.status_code != 200:
@@ -118,30 +106,33 @@ def extract_price_from_url(url, timeout=8):
     except Exception:
         return None
 
-# -----------------------------
-# Search engines + direct sites
-# -----------------------------
+# --------------------
+# Search engines
+# --------------------
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={query}",
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
     "brave": "https://search.brave.com/search?q={query}",
-    "qwant": "https://lite.qwant.com/?q={query}"
+    "qwant": "https://lite.qwant.com/?q={query}",
 }
 
-# direct retailer search URLs
-DIRECT_SITES = {
-    "amazon": "https://www.amazon.in/s?k={query}",
-    "flipkart": "https://www.flipkart.com/search?q={query}",
-    "croma": "https://www.croma.com/search/?text={query}",
-    "reliancedigital": "https://www.reliancedigital.in/search?q={query}",
-    "tatacliq": "https://www.tatacliq.com/search/?searchCategory=all&text={query}"
+# --------------------
+# Direct shopping sites search pages
+# --------------------
+SHOPPING_SITES = {
+    "amazon.in": "https://www.amazon.in/s?k={query}",
+    "flipkart.com": "https://www.flipkart.com/search?q={query}",
+    "croma.com": "https://www.croma.com/search/?text={query}",
+    "reliancedigital.in": "https://www.reliancedigital.in/search?q={query}",
+    "tatacliq.com": "https://www.tatacliq.com/search/?searchCategory=all&text={query}",
+    "snapdeal.com": "https://www.snapdeal.com/search?keyword={query}",
 }
 
-# -----------------------------
-# Utils (same as yours)
-# -----------------------------
+# --------------------
+# Utils
+# --------------------
 BLOCKED_DOMAINS = ["wikipedia", "youtube", "facebook", "twitter", "instagram", "reddit", "medium"]
-PATH_HINTS = ["product", "p/", "shop", "store", "buy", "product-category", "cart", "checkout"]
+PATH_HINTS = ["product", "p/", "shop", "store", "buy", "product-category"]
 BLOCKED_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".svg")
 
 def clean_outgoing_url(href):
@@ -151,21 +142,21 @@ def clean_outgoing_url(href):
         return href.split("&rut=")[0]
     if "uddg=" in href:
         try: return unquote(href.split("uddg=")[-1].split("&")[0])
-        except Exception: return None
+        except: return None
     if href.startswith("/"):
         try:
             if "q=" in href:
                 q = href.split("q=")[-1].split("&")[0]
-                if q.startswith("http"): return unquote(q)
-        except Exception: return None
+                if q.startswith("http"):
+                    return unquote(q)
+        except: return None
     return None
 
 def normalize_key(url):
     try:
         u = urlparse(url)
         return f"{u.scheme}://{u.netloc}{u.path}".rstrip("/")
-    except Exception:
-        return url
+    except: return url
 
 def is_valid_shopping_url(url):
     try:
@@ -176,11 +167,9 @@ def is_valid_shopping_url(url):
         path_q = (urlparse(url).path + "?" + (urlparse(url).query or "")).lower()
         if any(h in host for h in ["amazon.in", "flipkart.com", "croma.com", "reliancedigital.in", "tatacliq.com", "snapdeal.com"]):
             return True
-        if any(hint in path_q for hint in PATH_HINTS):
-            return True
+        if any(hint in path_q for hint in PATH_HINTS): return True
         return False
-    except Exception:
-        return False
+    except: return False
 
 def extract_links_from_html(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -195,20 +184,17 @@ def extract_links_from_html(html):
 def fetch_html(url, timeout=8):
     try:
         r = SESSION.get(url, headers=default_headers(), timeout=timeout)
-        if r.status_code != 200:
-            return None
-        if "text/html" not in r.headers.get("Content-Type", ""):
-            return None
+        if r.status_code != 200: return None
+        if "text/html" not in r.headers.get("Content-Type", ""): return None
         return r.text
-    except Exception:
-        return None
+    except Exception: return None
 
-# -----------------------------
-# Flask endpoints
-# -----------------------------
+# --------------------
+# Flask Endpoints
+# --------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Upgraded Pro) is running!"
+    return "🔥 CreativeScraper (Upgraded + Direct Shopping Sites) is running!"
 
 @app.route('/ping')
 def ping():
@@ -227,52 +213,53 @@ def scrape():
 
     candidates, seen_keys = [], set()
     per_engine_limit = 12
-    sleep_between = 1.0
+    sleep_between = 0.8 + random.random()*0.5  # jitter
 
-    # 1) Direct site scraping first
-    for site, tmpl in DIRECT_SITES.items():
+    # 1) Direct shopping site search pages
+    for site, tmpl in SHOPPING_SITES.items():
         url = tmpl.format(query=encoded)
         html = fetch_html(url)
         if not html: continue
         links = extract_links_from_html(html)
-        for href, title in links[:8]:
-            if not is_valid_shopping_url(href): continue
-            key = normalize_key(href)
-            if key in seen_keys: continue
-            seen_keys.add(key)
-            candidates.append({"title": title, "url": href, "source": site})
-
-    # 2) Search engines next
-    for engine_name, tmpl in SEARCH_ENGINES.items():
-        url = tmpl.format(query=encoded)
-        html = fetch_html(url)
-        if not html: continue
-        links = extract_links_from_html(html)
-        added = 0
         for href, title in links:
             if not is_valid_shopping_url(href): continue
             key = normalize_key(href)
             if key in seen_keys: continue
             seen_keys.add(key)
-            candidates.append({"title": title or engine_name, "url": href, "source": engine_name})
-            added += 1
-            if added >= per_engine_limit or len(candidates) >= 60:
-                break
+            candidates.append({"title": title or site, "url": href, "source": site})
         time.sleep(sleep_between)
 
+    # 2) Search engines fallback
+    for engine_name, tmpl in SEARCH_ENGINES.items():
+        try:
+            url = tmpl.format(query=encoded)
+            html = fetch_html(url)
+            if not html:
+                time.sleep(sleep_between)
+                continue
+            links = extract_links_from_html(html)
+            added = 0
+            for href, title in links:
+                if not is_valid_shopping_url(href): continue
+                key = normalize_key(href)
+                if key in seen_keys: continue
+                seen_keys.add(key)
+                candidates.append({"title": title or engine_name, "url": href, "source": engine_name})
+                added += 1
+                if added >= per_engine_limit or len(candidates) >= 60: break
+            time.sleep(sleep_between)
+        except: continue
+
     # 3) Fetch prices concurrently
-    top = candidates[:min(len(candidates), 40)]
+    top = candidates[:min(len(candidates), 30)]
     if top:
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             futs = {ex.submit(extract_price_from_url, item["url"]): i for i, item in enumerate(top)}
             for fut in concurrent.futures.as_completed(futs):
                 i = futs[fut]
-                try:
-                    price = fut.result()
-                except Exception:
-                    price = None
-                if price:
-                    top[i]["price"] = price
+                try: price = fut.result()
+                except: price = None
+                if price: top[i]["price"] = price
 
     # 4) Ranking
     def rank_key(it):
@@ -281,13 +268,13 @@ def scrape():
         if it.get("price"): score += 100
         if "amazon.in" in host: score += 50
         if "flipkart.com" in host: score += 45
-        if any(x in host for x in ["croma.com", "reliancedigital.in", "tatacliq.com"]): score += 30
+        if any(x in host for x in ["croma.com", "reliancedigital.in", "tatacliq.com", "snapdeal.com"]):
+            score += 30
         return -score
 
     top.sort(key=rank_key)
     final = top[:max_results]
 
-    # Output
     out = []
     for item in final:
         out_item = {
