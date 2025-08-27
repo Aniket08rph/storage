@@ -2,51 +2,96 @@ from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-import re
+import re, random, time
 
 app = Flask(__name__)
 
 # -----------------------------
-# Function to extract price from a product page
+# Rotating User-Agents
 # -----------------------------
-def extract_price_from_url(url):
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Linux; Android 10; Redmi Note 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile Safari/604.1",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
+]
+
+def get_headers():
+    return {"User-Agent": random.choice(USER_AGENTS)}
+
+# -----------------------------
+# Extract price + image
+# -----------------------------
+def extract_price_image_from_url(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-        }
-        res = requests.get(url, headers=headers, timeout=8)
+        res = requests.get(url, headers=get_headers(), timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # Extract ₹, Rs, or $ prices
+        # --- PRICE ---
         price_text = soup.get_text()
         patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+        price = "Price not found"
         for pattern in patterns:
             prices = re.findall(pattern, price_text)
             if prices:
-                return prices[0]
+                price = prices[0]
+                break
 
-        return "Price not found"
+        # --- IMAGE ---
+        img_url = None
+        # Priority 1: Open Graph meta tag
+        og_img = soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            img_url = og_img["content"]
+        # Priority 2: Amazon, Flipkart, etc. product image IDs/classes
+        if not img_url:
+            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
+            if img and img.get("src"):
+                img_url = img["src"]
+        # Fallback: First big image
+        if not img_url:
+            imgs = soup.find_all("img", src=True)
+            if imgs:
+                img_url = imgs[0]["src"]
+
+        return {
+            "price": price,
+            "image": img_url if img_url else "Image not found"
+        }
 
     except Exception:
-        return "Error fetching"
+        return {"price": "Error fetching", "image": None}
 
 # -----------------------------
-# Search engine URLs (with fallback order)
+# Search engine URLs
 # -----------------------------
 SEARCH_ENGINES = {
     "brave": "https://search.brave.com/search?q={query}",
     "bing": "https://bing.com/search?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
-    "yahoo": "https://search.yahoo.com/search?p={query}"
+    "yahoo": "https://search.yahoo.com/search?p={query}",
+    "mojeek": "https://www.mojeek.com/search?q={query}",
+    "searx": "https://searx.org/search?q={query}"
 }
+
+# -----------------------------
+# Block junk domains
+# -----------------------------
+BLOCKED_DOMAINS = [
+    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
+    "news", "blog", "review", "howto", "tutorial"
+]
+
+def is_shopping_url(url):
+    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
 
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Multi-Engine Fallback) is running!"
+    return "🔥 CreativeScraper (Multi-Engine Fallback + Images) is running!"
 
-# ✅ Health check endpoint for UptimeRobot
 @app.route('/ping')
 def ping():
     return jsonify({"status": "ok"}), 200
@@ -59,21 +104,15 @@ def scrape():
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
-    # Automatically make it India-focused
-    search_query = f"{query} Buy in India"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10)"
-    }
+    search_query = f"{query} Buy Online in India"
 
     results = []
     seen_urls = set()
 
-    # Loop through engines until results found
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
             search_url = engine_url.format(query=search_query.replace(' ', '+'))
-            res = requests.get(search_url, headers=headers, timeout=8)
+            res = requests.get(search_url, headers=get_headers(), timeout=8)
             if res.status_code != 200:
                 continue
 
@@ -81,8 +120,6 @@ def scrape():
 
             for a in soup.find_all('a', href=True):
                 href = a['href']
-
-                # Try to extract real URLs from search engine redirects
                 if "uddg=" in href:
                     full_url = unquote(href.split("uddg=")[-1])
                 elif href.startswith("http"):
@@ -93,34 +130,34 @@ def scrape():
                 clean_url = full_url.split("&rut=")[0]
                 text = a.get_text().strip()
 
-                # Avoid duplicates
-                if clean_url in seen_urls:
+                if clean_url in seen_urls or not is_shopping_url(clean_url):
                     continue
                 seen_urls.add(clean_url)
 
-                # Basic filter
-                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs']):
-                    price = extract_price_from_url(clean_url)
-                    if price not in ["Price not found", "Error fetching"]:
+                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
+                    data = extract_price_image_from_url(clean_url)
+                    if data["price"] not in ["Price not found", "Error fetching"]:
                         results.append({
                             "title": text,
                             "url": clean_url,
-                            "price": price
+                            "price": data["price"],
+                            "image": data["image"]
                         })
 
                 if len(results) >= 10:
                     break
 
-            # ✅ Stop if results found from this engine
             if results:
                 break
+
+            time.sleep(random.uniform(1, 2))
 
         except Exception:
             continue
 
     return jsonify({
         "product": search_query,
-        "results": results[:10]  # Max 10 results
+        "results": results[:10]
     })
 
 if __name__ == '__main__':
