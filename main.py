@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import requests
-from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re, random, time
@@ -18,64 +17,15 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
 ]
 
-# -----------------------------
-# Proxy Pool (Optional: put real rotating proxies here)
-# -----------------------------
-PROXY_POOL = [
-    # Example format:
-    # "http://user:pass@proxy1:port",
-    # "http://user:pass@proxy2:port"
-]
-
-def get_proxy():
-    return random.choice(PROXY_POOL) if PROXY_POOL else None
-
-# -----------------------------
-# Session with Retry + Backoff
-# -----------------------------
-def get_session():
-    session = requests.Session()
-    retries = Retry(
-        total=5,                  # retry max 5 times
-        backoff_factor=1,         # wait 1s, 2s, 4s...
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-# -----------------------------
-# Headers with Rotation
-# -----------------------------
 def get_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept-Language": random.choice([
-            "en-US,en;q=0.9",
-            "en-GB,en;q=0.8",
-            "hi-IN,hi;q=0.9,en-US;q=0.8"
-        ]),
-        "Referer": random.choice([
-            "https://www.google.com/",
-            "https://www.bing.com/",
-            "https://duckduckgo.com/"
-        ]),
-        "Connection": "keep-alive"
-    }
+    return {"User-Agent": random.choice(USER_AGENTS)}
 
 # -----------------------------
 # Extract price + image
 # -----------------------------
 def extract_price_image_from_url(url):
     try:
-        session = get_session()
-        res = session.get(
-            url,
-            headers=get_headers(),
-            proxies={"http": get_proxy(), "https": get_proxy()} if PROXY_POOL else None,
-            timeout=10
-        )
+        res = requests.get(url, headers=get_headers(), timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
 
         # --- PRICE ---
@@ -90,16 +40,16 @@ def extract_price_image_from_url(url):
 
         # --- IMAGE ---
         img_url = None
+        # Priority 1: Open Graph meta tag
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
-
+        # Priority 2: Amazon, Flipkart, etc. product image IDs/classes
         if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find(
-                "img", {"class": re.compile(r'(product|main).*image', re.I)})
+            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
             if img and img.get("src"):
                 img_url = img["src"]
-
+        # Fallback: First big image
         if not img_url:
             imgs = soup.find_all("img", src=True)
             if imgs:
@@ -120,7 +70,8 @@ SEARCH_ENGINES = {
     "brave": "https://search.brave.com/search?q={query}",
     "bing": "https://bing.com/search?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
-    "duckduckgo": "https://duckduckgo.com/html/?q={query}"
+    "duckduckgo": "https://duckduckgo.com/html/?q={query}",
+    "yahoo": "https://search.yahoo.com/search?p={query}",
     "mojeek": "https://www.mojeek.com/search?q={query}",
     "searx": "https://searx.org/search?q={query}"
 }
@@ -139,7 +90,7 @@ def is_shopping_url(url):
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Hardened + Proxies + Backoff) is running!"
+    return "🔥 CreativeScraper (Multi-Engine Fallback + Images) is running!"
 
 @app.route('/ping')
 def ping():
@@ -154,22 +105,14 @@ def scrape():
         return jsonify({'error': 'Query required'}), 400
 
     search_query = f"{query} Buy Online in India"
-    results, seen_urls = [], set()
 
-    # randomize engine order
-    engines = list(SEARCH_ENGINES.items())
-    random.shuffle(engines)
+    results = []
+    seen_urls = set()
 
-    for engine_name, engine_url in engines:
+    for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
-            session = get_session()
             search_url = engine_url.format(query=search_query.replace(' ', '+'))
-            res = session.get(
-                search_url,
-                headers=get_headers(),
-                proxies={"http": get_proxy(), "https": get_proxy()} if PROXY_POOL else None,
-                timeout=10
-            )
+            res = requests.get(search_url, headers=get_headers(), timeout=8)
             if res.status_code != 200:
                 continue
 
@@ -207,7 +150,7 @@ def scrape():
             if results:
                 break
 
-            time.sleep(random.uniform(1.5, 4.0))  # avoid hammering
+            time.sleep(random.uniform(1, 2))
 
         except Exception:
             continue
