@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 import re, random, time
 
 app = Flask(__name__)
@@ -40,20 +40,31 @@ def extract_price_image_from_url(url):
 
         # --- IMAGE ---
         img_url = None
+
         # Priority 1: Open Graph meta tag
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
+
         # Priority 2: Amazon, Flipkart, etc. product image IDs/classes
         if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
-            if img and img.get("src"):
-                img_url = img["src"]
-        # Fallback: First big image
+            img = soup.find("img", {"id": "landingImage"}) or \
+                  soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
+            if img:
+                img_url = img.get("src") or img.get("data-src") or img.get("data-image")
+
+        # Priority 3: First valid image
         if not img_url:
-            imgs = soup.find_all("img", src=True)
-            if imgs:
-                img_url = imgs[0]["src"]
+            imgs = soup.find_all("img")
+            for img in imgs:
+                candidate = img.get("src") or img.get("data-src") or img.get("data-image")
+                if candidate and not candidate.startswith("data:"):  # skip base64
+                    img_url = candidate
+                    break
+
+        # Normalize relative URLs
+        if img_url:
+            img_url = urljoin(url, img_url)
 
         return {
             "price": price,
@@ -71,7 +82,7 @@ SEARCH_ENGINES = {
     "bing": "https://bing.com/search?q={query}",
     "qwant": "https://lite.qwant.com/?q={query}",
     "duckduckgo": "https://duckduckgo.com/html/?q={query}",
-    "yahoo": "https://search.yahoo.com/search?p={query}",
+    "you": "https://you.com/search?q={query}&tbm=shop",  # 🔥 replaced Yahoo
     "mojeek": "https://www.mojeek.com/search?q={query}",
     "searx": "https://searx.org/search?q={query}"
 }
