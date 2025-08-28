@@ -1,66 +1,82 @@
 from flask import Flask, request, jsonify
-import requests, re, random, time, asyncio
+import requests
+from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
-from urllib.parse import unquote, urljoin
-from playwright.async_api import async_playwright
+from urllib.parse import unquote
+import re, random, time
 
 app = Flask(__name__)
 
-# ------------------------------------
-# Rotating User-Agents + Proxies
-# ------------------------------------
+# -----------------------------
+# Rotating User-Agents
+# -----------------------------
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile Safari/604.1",
     "Mozilla/5.0 (Linux; Android 10; Redmi Note 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile Safari/604.1",
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
 ]
 
+# -----------------------------
+# Proxy Pool (Optional: put real rotating proxies here)
+# -----------------------------
 PROXY_POOL = [
+    # Example format:
     # "http://user:pass@proxy1:port",
     # "http://user:pass@proxy2:port"
 ]
 
-BLOCKED_DOMAINS = [
-    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
-    "news", "blog", "review", "howto", "tutorial"
-]
-
-SEARCH_ENGINES = {
-    "bing": "https://www.bing.com/search?q={query}",
-    "duckduckgo": "https://duckduckgo.com/html/?q={query}",
-    "brave": "https://search.brave.com/search?q={query}",
-    "qwant": "https://lite.qwant.com/?q={query}",
-    "mojeek": "https://www.mojeek.com/search?q={query}",
-    "you": "https://you.com/search?q={query}&tbm=shop",
-    "startpage": "https://www.startpage.com/sp/search?q={query}"
-}
-
-# ------------------------------------
-# Utils
-# ------------------------------------
-def get_headers():
-    return {"User-Agent": random.choice(USER_AGENTS)}
-
 def get_proxy():
     return random.choice(PROXY_POOL) if PROXY_POOL else None
 
-def is_shopping_url(url):
-    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
+# -----------------------------
+# Session with Retry + Backoff
+# -----------------------------
+def get_session():
+    session = requests.Session()
+    retries = Retry(
+        total=5,                  # retry max 5 times
+        backoff_factor=1,         # wait 1s, 2s, 4s...
+        status_forcelist=[429, 500, 502, 503, 504]
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
-# ------------------------------------
-# Price + Image Extractor
-# ------------------------------------
+# -----------------------------
+# Headers with Rotation
+# -----------------------------
+def get_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": random.choice([
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.8",
+            "hi-IN,hi;q=0.9,en-US;q=0.8"
+        ]),
+        "Referer": random.choice([
+            "https://www.google.com/",
+            "https://www.bing.com/",
+            "https://duckduckgo.com/"
+        ]),
+        "Connection": "keep-alive"
+    }
+
+# -----------------------------
+# Extract price + image
+# -----------------------------
 def extract_price_image_from_url(url):
     try:
-        res = requests.get(
+        session = get_session()
+        res = session.get(
             url,
             headers=get_headers(),
             proxies={"http": get_proxy(), "https": get_proxy()} if PROXY_POOL else None,
-            timeout=12
+            timeout=10
         )
-        soup = BeautifulSoup(res.text, "html.parser")
+        soup = BeautifulSoup(res.text, 'html.parser')
 
         # --- PRICE ---
         price_text = soup.get_text()
@@ -79,111 +95,127 @@ def extract_price_image_from_url(url):
             img_url = og_img["content"]
 
         if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
-            if img:
-                img_url = img.get("src") or img.get("data-src") or img.get("data-image")
+            img = soup.find("img", {"id": "landingImage"}) or soup.find(
+                "img", {"class": re.compile(r'(product|main).*image', re.I)})
+            if img and img.get("src"):
+                img_url = img["src"]
 
         if not img_url:
-            for img in soup.find_all("img"):
-                candidate = img.get("src") or img.get("data-src")
-                if candidate and not candidate.startswith("data:"):
-                    img_url = candidate
-                    break
+            imgs = soup.find_all("img", src=True)
+            if imgs:
+                img_url = imgs[0]["src"]
 
-        if img_url:
-            img_url = urljoin(url, img_url)
-
-        return {"price": price, "image": img_url or "Image not found"}
+        return {
+            "price": price,
+            "image": img_url if img_url else "Image not found"
+        }
 
     except Exception:
         return {"price": "Error fetching", "image": None}
 
-# ------------------------------------
-# Playwright (for JS-heavy engines)
-# ------------------------------------
-async def playwright_fetch(url):
-    async with async_playwright() as p:
-        browser = await p.firefox.launch(headless=True)
-        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-        page = await context.new_page()
-        await page.goto(url, timeout=40000)
-        content = await page.content()
-        await browser.close()
-        return BeautifulSoup(content, "html.parser")
+# -----------------------------
+# Search engine URLs
+# -----------------------------
+SEARCH_ENGINES = {
+    "brave": "https://search.brave.com/search?q={query}",
+    "bing": "https://bing.com/search?q={query}",
+    "qwant": "https://lite.qwant.com/?q={query}",
+    "duckduckgo": "https://duckduckgo.com/html/?q={query}"
+    "mojeek": "https://www.mojeek.com/search?q={query}",
+    "searx": "https://searx.org/search?q={query}"
+}
 
-# ------------------------------------
-# Scraper Logic
-# ------------------------------------
-def scrape_engine(engine, query):
-    try:
-        url = SEARCH_ENGINES[engine].format(query=query.replace(" ", "+"))
+# -----------------------------
+# Block junk domains
+# -----------------------------
+BLOCKED_DOMAINS = [
+    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
+    "news", "blog", "review", "howto", "tutorial"
+]
 
-        # Playwright for JS engines
-        if engine in ["you"]:
-            soup = asyncio.run(playwright_fetch(url))
-        else:
-            res = requests.get(url, headers=get_headers(), timeout=12)
-            if res.status_code != 200:
-                return []
-            soup = BeautifulSoup(res.text, "html.parser")
+def is_shopping_url(url):
+    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
 
-        results, seen = [], set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if not href.startswith("http"):
-                continue
-
-            clean_url = unquote(href.split("&")[0])
-            if clean_url in seen or not is_shopping_url(clean_url):
-                continue
-            seen.add(clean_url)
-
-            if not any(term in a.get_text().lower() for term in ["buy", "price", "shop", "₹", "$"]):
-                continue
-
-            data = extract_price_image_from_url(clean_url)
-            if data["price"] not in ["Price not found", "Error fetching"]:
-                results.append({
-                    "title": a.get_text().strip()[:100],
-                    "url": clean_url,
-                    "price": data["price"],
-                    "image": data["image"]
-                })
-
-            if len(results) >= 20:
-                break
-
-        return results
-
-    except Exception:
-        return []
-
-# ------------------------------------
-# Flask Endpoints
-# ------------------------------------
+# -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper Enterprise (Multi-engine + Playwright + Proxies) running!"
+    return "🔥 CreativeScraper (Hardened + Proxies + Backoff) is running!"
+
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
-    query = data.get("query")
+    query = data.get('query')
+
     if not query:
-        return jsonify({"error": "Query required"}), 400
+        return jsonify({'error': 'Query required'}), 400
 
-    search_query = f"{query} Buy Online India"
-    all_results = []
+    search_query = f"{query} Buy Online in India"
+    results, seen_urls = [], set()
 
-    for engine in SEARCH_ENGINES:
-        results = scrape_engine(engine, search_query)
-        if results:
-            all_results.extend(results)
-        if len(all_results) >= 20:
-            break
-        time.sleep(random.uniform(1, 2))
+    # randomize engine order
+    engines = list(SEARCH_ENGINES.items())
+    random.shuffle(engines)
 
-    return jsonify({"product": search_query, "results": all_results[:20]})
+    for engine_name, engine_url in engines:
+        try:
+            session = get_session()
+            search_url = engine_url.format(query=search_query.replace(' ', '+'))
+            res = session.get(
+                search_url,
+                headers=get_headers(),
+                proxies={"http": get_proxy(), "https": get_proxy()} if PROXY_POOL else None,
+                timeout=10
+            )
+            if res.status_code != 200:
+                continue
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+            soup = BeautifulSoup(res.text, "html.parser")
+
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if "uddg=" in href:
+                    full_url = unquote(href.split("uddg=")[-1])
+                elif href.startswith("http"):
+                    full_url = href
+                else:
+                    continue
+
+                clean_url = full_url.split("&rut=")[0]
+                text = a.get_text().strip()
+
+                if clean_url in seen_urls or not is_shopping_url(clean_url):
+                    continue
+                seen_urls.add(clean_url)
+
+                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
+                    data = extract_price_image_from_url(clean_url)
+                    if data["price"] not in ["Price not found", "Error fetching"]:
+                        results.append({
+                            "title": text,
+                            "url": clean_url,
+                            "price": data["price"],
+                            "image": data["image"]
+                        })
+
+                if len(results) >= 10:
+                    break
+
+            if results:
+                break
+
+            time.sleep(random.uniform(1.5, 4.0))  # avoid hammering
+
+        except Exception:
+            continue
+
+    return jsonify({
+        "product": search_query,
+        "results": results[:10]
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
