@@ -1,8 +1,9 @@
 from flask import Flask, request, jsonify
-import requests, re, random, time
+import asyncio, random, re, time
+import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 app = Flask(__name__)
 
@@ -28,126 +29,195 @@ BLOCKED_DOMAINS = [
     "reddit.com", "news", "blog", "review", "howto", "tutorial"
 ]
 
-def is_shopping_url(url):
-    return url.startswith("http") and not any(block in url.lower() for block in BLOCKED_DOMAINS)
+def is_shopping_url(url: str) -> bool:
+    return url and url.startswith("http") and not any(block in url.lower() for block in BLOCKED_DOMAINS)
 
 # -----------------------------
-# Playwright helper
+# Playwright helper (async)
 # -----------------------------
-def playwright_session():
-    p = sync_playwright().start()
-    browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-    page = browser.new_page()
-    page.set_user_agent(random.choice(USER_AGENTS))
+async def playwright_context():
+    """
+    Creates a Playwright chromium browser+page with container-friendly flags.
+    Call:  p, browser, page = await playwright_context()
+    Always close: await browser.close(); await p.stop()
+    """
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-web-security",
+        ],
+    )
+    context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+    page = await context.new_page()
+    # Slightly more stealthy defaults
+    await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return p, browser, page
 
 # -----------------------------
-# Amazon scraping
+# Amazon scraping (async)
 # -----------------------------
-def scrape_amazon(query):
+async def scrape_amazon(query: str, max_items: int = 20):
     results = []
-    p, browser, page = playwright_session()
+    p = browser = page = None
     try:
+        p, browser, page = await playwright_context()
         url = f"https://www.amazon.in/s?k={query.replace(' ', '+')}"
-        page.goto(url, timeout=20000)
-        page.wait_for_timeout(3000)
+        await page.goto(url, timeout=25000)
+        await page.wait_for_timeout(2500)
 
-        items = page.query_selector_all("div.s-result-item[data-asin]")[:20]  # increased to 20
+        items = await page.query_selector_all("div.s-result-item[data-asin]")
         for item in items:
-            title = item.query_selector("h2 a span")
-            price = item.query_selector("span.a-price-whole")
-            image = item.query_selector("img.s-image")
+            if len(results) >= max_items:
+                break
+            title_el = await item.query_selector("h2 a span")
+            price_whole = await item.query_selector("span.a-price > span.a-offscreen")  # better selector
+            image_el = await item.query_selector("img.s-image")
+            link_el = await item.query_selector("h2 a")
 
-            if title and price and image:
-                results.append({
-                    "title": title.inner_text().strip(),
-                    "url": "https://www.amazon.in" + item.query_selector("h2 a").get_attribute("href"),
-                    "price": "₹" + price.inner_text().strip(),
-                    "image": image.get_attribute("src")
-                })
+            if not (title_el and price_whole and image_el and link_el):
+                continue
+
+            title = (await title_el.inner_text()).strip()
+            price_text = (await price_whole.inner_text()).strip()
+            href = await link_el.get_attribute("href")
+            image = await image_el.get_attribute("src")
+
+            if not href:
+                continue
+
+            results.append({
+                "title": title,
+                "url": "https://www.amazon.in" + href,
+                "price": price_text,
+                "image": image
+            })
     except Exception as e:
-        print("Amazon scrape error:", e)
+        print("Amazon scrape error:", repr(e))
     finally:
-        browser.close()
-        p.stop()
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+        try:
+            if p:
+                await p.stop()
+        except Exception:
+            pass
     return results
 
 # -----------------------------
-# Flipkart scraping
+# Flipkart scraping (async)
 # -----------------------------
-def scrape_flipkart(query):
+async def scrape_flipkart(query: str, max_items: int = 20):
     results = []
-    p, browser, page = playwright_session()
+    p = browser = page = None
     try:
+        p, browser, page = await playwright_context()
         url = f"https://www.flipkart.com/search?q={query.replace(' ', '+')}"
-        page.goto(url, timeout=20000)
-        page.wait_for_timeout(3000)
+        await page.goto(url, timeout=25000)
+        await page.wait_for_timeout(2500)
 
-        items = page.query_selector_all("div._1AtVbE")[:20]  # increased to 20
-        for item in items:
-            title = item.query_selector("a.s1Q9rs, a.IRpwTa, div._4rR01T")
-            price = item.query_selector("div._30jeq3")
-            image = item.query_selector("img._396cs4, img._2r_T1I")
+        # Product cards can vary by category; cover common selectors
+        cards = await page.query_selector_all("div._1AtVbE")
+        for item in cards:
+            if len(results) >= max_items:
+                break
 
-            if title and price and image:
-                results.append({
-                    "title": title.inner_text().strip(),
-                    "url": "https://www.flipkart.com" + (title.get_attribute("href") or ""),
-                    "price": price.inner_text().strip(),
-                    "image": image.get_attribute("src")
-                })
+            title_el = await item.query_selector("div._4rR01T, a.s1Q9rs, a.IRpwTa")
+            price_el = await item.query_selector("div._30jeq3")
+            image_el = await item.query_selector("img._396cs4, img._2r_T1I")
+            link_el = title_el  # same element usually carries href
+
+            if not (title_el and price_el and image_el):
+                continue
+
+            title = (await title_el.inner_text()).strip()
+            price_text = (await price_el.inner_text()).strip()
+            href = await link_el.get_attribute("href") if link_el else None
+            image = await image_el.get_attribute("src")
+
+            if not href:
+                continue
+
+            if href.startswith("/"):
+                href = "https://www.flipkart.com" + href
+
+            results.append({
+                "title": title,
+                "url": href,
+                "price": price_text,
+                "image": image
+            })
     except Exception as e:
-        print("Flipkart scrape error:", e)
+        print("Flipkart scrape error:", repr(e))
     finally:
-        browser.close()
-        p.stop()
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+        try:
+            if p:
+                await p.stop()
+        except Exception:
+            pass
     return results
 
 # -----------------------------
-# Fallback generic scraper
+# Generic scraper (requests + BS)
 # -----------------------------
-def scrape_generic(url):
+def scrape_generic(url: str):
     try:
-        res = requests.get(url, headers=get_headers(), timeout=8)
+        res = requests.get(url, headers=get_headers(), timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
 
+        # Try JSON-LD (structured data)
         price = None
-        ld_json = soup.find("script", type="application/ld+json")
-        if ld_json:
-            m = re.search(r'"price"\s*:\s*"?([0-9.,₹$]+)"?', ld_json.text)
+        for ld in soup.find_all("script", type="application/ld+json"):
+            m = re.search(r'"price"\s*:\s*"?([0-9.,₹$]+)"?', ld.text)
             if m:
                 price = m.group(1)
+                break
 
+        # Fallback regex
         if not price:
-            text = soup.get_text()
-            patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+            text = soup.get_text(" ", strip=True)
+            patterns = [r'₹\s?[0-9,]+(?:\.[0-9]{1,2})?', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
             for pattern in patterns:
                 prices = re.findall(pattern, text)
                 if prices:
                     price = prices[0]
                     break
 
+        # Image
         img_url = None
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            img_url = og_img["content"]
+            img_url = og_img.get("content")
         if not img_url:
-            img = soup.find("img")
-            if img and img.get("src"):
-                img_url = img["src"]
+            img = soup.find("img", src=True)
+            if img:
+                img_url = img.get("src")
 
+        title = soup.title.string.strip() if soup.title and soup.title.string else url
         return {
-            "title": soup.title.string if soup.title else url,
+            "title": title,
             "url": url,
             "price": price if price else "Price not found",
             "image": img_url if img_url else "Image not found"
         }
     except Exception as e:
-        print("Generic scrape error:", e)
+        print("Generic scrape error:", repr(e))
         return {"title": url, "url": url, "price": "Error fetching", "image": None}
 
 # -----------------------------
-# Multi-engine search
+# Multi-engine search (sync)
 # -----------------------------
 SEARCH_ENGINES = {
     "brave": "https://search.brave.com/search?q={query}",
@@ -159,63 +229,99 @@ SEARCH_ENGINES = {
     "searx": "https://searx.org/search?q={query}"
 }
 
-def engine_search(query):
-    urls = set()
-    boosted_query = f"{query} site:amazon.in OR site:flipkart.com OR site:croma.com OR site:reliancedigital.in OR site:tatacliq.com"
+def engine_search(query: str, max_urls: int = 20):
+    urls = []
+    seen = set()
+
+    # Bias engines toward big sites but still allow normal sites
+    boosted_query = (
+        f"{query} (site:amazon.in OR site:flipkart.com OR site:croma.com "
+        f"OR site:reliancedigital.in OR site:tatacliq.com) OR {query} buy online india"
+    )
 
     for engine, base_url in SEARCH_ENGINES.items():
         try:
             search_url = base_url.format(query=boosted_query.replace(" ", "+"))
-            res = requests.get(search_url, headers=get_headers(), timeout=8)
+            res = requests.get(search_url, headers=get_headers(), timeout=10)
+            if res.status_code != 200:
+                continue
             soup = BeautifulSoup(res.text, "html.parser")
             for a in soup.find_all("a", href=True):
-                href = unquote(a["href"])
-                if is_shopping_url(href):
-                    urls.add(href.split("&")[0])
+                href = unquote(a["href"]).split("&")[0]
+                if is_shopping_url(href) and href not in seen:
+                    seen.add(href)
+                    urls.append(href)
+                    if len(urls) >= max_urls:
+                        return urls
         except Exception as e:
-            print(f"{engine} search error:", e)
-        time.sleep(random.uniform(1, 2))
-    return list(urls)[:20]  # increased to 20
+            print(f"{engine} search error:", repr(e))
+        time.sleep(random.uniform(0.8, 1.6))
+    return urls
 
 # -----------------------------
 # Routes
 # -----------------------------
-@app.route('/')
+@app.route("/")
 def home():
-    return "🔥 CreativeScraper (Amazon + Flipkart + Multi-Engine, 20 results max) is running!"
+    return "🔥 CreativeScraper (Async Playwright + Multi-Engine, 20 results max) is running!"
 
-@app.route('/ping')
+@app.route("/ping")
 def ping():
     return jsonify({"status": "ok"}), 200
 
-@app.route('/scrape', methods=['POST'])
+@app.route("/scrape", methods=["POST"])
 def scrape():
-    data = request.json
-    query = data.get("query")
+    data = request.json or {}
+    query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "Query required"}), 400
 
+    MAX_RESULTS = 20
     results = []
 
-    # 1. Amazon
-    results.extend(scrape_amazon(query))
+    try:
+        # Run Amazon + Flipkart concurrently (async)
+        amz, fk = asyncio.run(
+            asyncio.wait_for(
+                asyncio.gather(
+                    scrape_amazon(query, max_items=MAX_RESULTS),
+                    scrape_flipkart(query, max_items=MAX_RESULTS),
+                ),
+                timeout=40,  # overall timeout for both
+            )
+        )
+        results.extend(amz)
+        if len(results) < MAX_RESULTS:
+            results.extend(fk)
 
-    # 2. Flipkart
-    if len(results) < 20:
-        results.extend(scrape_flipkart(query))
+        # Multi-engine fallback if we still need more
+        if len(results) < MAX_RESULTS:
+            urls = engine_search(query, max_urls=MAX_RESULTS)
+            for u in urls:
+                if len(results) >= MAX_RESULTS:
+                    break
+                results.append(scrape_generic(u))
 
-    # 3. Multi-engine search for other big sites
-    if len(results) < 20:
-        urls = engine_search(query)
-        for url in urls:
-            results.append(scrape_generic(url))
-            if len(results) >= 20:
-                break
+        # Deduplicate by URL while keeping order
+        seen = set()
+        deduped = []
+        for r in results:
+            url = r.get("url")
+            if url and url not in seen:
+                seen.add(url)
+                deduped.append(r)
 
-    return jsonify({
-        "product": query,
-        "results": results[:20]  # return max 20
-    })
+        return jsonify({
+            "product": query,
+            "results": deduped[:MAX_RESULTS]
+        })
+
+    except Exception as e:
+        import traceback
+        print("[/scrape fatal]", repr(e))
+        print(traceback.format_exc())
+        return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    # Local run
     app.run(host="0.0.0.0", port=8080)
