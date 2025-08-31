@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import re, random, time
@@ -20,23 +21,28 @@ USER_AGENTS = [
 def get_random_ua():
     return random.choice(USER_AGENTS)
 
+def get_random_viewport():
+    return {"width": random.randint(1280, 1920), "height": random.randint(720, 1080)}
+
 # -----------------------------
 # Extract price + image with Playwright
 # -----------------------------
-def extract_price_image_from_url(url):
+def extract_price_image_from_url(url, proxy=None):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
+                proxy=proxy if proxy else None,
                 args=["--no-sandbox", "--disable-setuid-sandbox"]
             )
             context = browser.new_context(
                 user_agent=get_random_ua(),
-                viewport={"width": 1280, "height": 800}
+                viewport=get_random_viewport()
             )
             page = context.new_page()
+            stealth_sync(page)  # 👈 stealth mode
 
-            # block fonts/images to save bandwidth
+            # block heavy resources
             def block_resources(route):
                 if route.request.resource_type in ["font", "stylesheet"]:
                     route.abort()
@@ -44,7 +50,8 @@ def extract_price_image_from_url(url):
                     route.continue_()
             context.route("**/*", block_resources)
 
-            page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            page.goto(url, timeout=20000, wait_until="domcontentloaded")
+            time.sleep(random.uniform(2, 4))  # human-like delay
             html = page.content()
             context.close()
             browser.close()
@@ -105,7 +112,7 @@ def is_shopping_url(url):
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Playwright + Multi-Engine + Images) is running!"
+    return "🔥 CreativeScraper (Playwright + Stealth + Multi-Engine + Images) is running!"
 
 @app.route('/ping')
 def ping():
@@ -121,6 +128,12 @@ def scrape():
     search_query = f"{query} Buy Online in India"
     results, seen_urls = [], set()
 
+    # (Optional) Rotating proxy list
+    PROXIES = [
+        # {"server": "http://user:pass@proxy1:port"},
+        # {"server": "http://user:pass@proxy2:port"}
+    ]
+
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
             search_url = engine_url.format(query=search_query.replace(" ", "+"))
@@ -131,7 +144,10 @@ def scrape():
                 )
                 context = browser.new_context(user_agent=get_random_ua())
                 page = context.new_page()
-                page.goto(search_url, timeout=10000)
+                stealth_sync(page)
+
+                page.goto(search_url, timeout=15000)
+                time.sleep(random.uniform(2, 3))
                 html = page.content()
                 context.close()
                 browser.close()
@@ -154,7 +170,8 @@ def scrape():
                 seen_urls.add(clean_url)
 
                 if any(term in text.lower() for term in ["₹", "price", "$", "rs", "buy"]):
-                    data = extract_price_image_from_url(clean_url)
+                    proxy = random.choice(PROXIES) if PROXIES else None
+                    data = extract_price_image_from_url(clean_url, proxy=proxy)
                     if data["price"] not in ["Price not found", "Error fetching"]:
                         results.append({
                             "title": text,
