@@ -3,9 +3,12 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-import re, random, time
+import re, random, time, os
 
 app = Flask(__name__)
+
+# ✅ Force Playwright to use persistent cache path
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/root/.cache/ms-playwright"
 
 # -----------------------------
 # Rotating User-Agents
@@ -108,11 +111,15 @@ def scrape():
 
     try:
         with sync_playwright() as p:
-            # 🔹 Launch browser once per request
+            # 🔹 Launch Chromium safely in Render
             browser = p.chromium.launch(
                 headless=True,
                 proxy=proxy,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
             )
             context = browser.new_context(
                 user_agent=get_random_ua(),
@@ -156,7 +163,6 @@ def scrape():
                         seen_urls.add(clean_url)
 
                         if any(term in text.lower() for term in ["₹", "price", "$", "rs", "buy"]):
-                            # visit product page in same browser
                             try:
                                 page.goto(clean_url, timeout=20000)
                                 time.sleep(random.uniform(2, 4))
@@ -185,7 +191,8 @@ def scrape():
             browser.close()
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # 🔹 Debug hint for Playwright binary issues
+        return jsonify({"error": str(e), "hint": "Check PLAYWRIGHT_BROWSERS_PATH and buildCommand in Render"}), 500
 
     return jsonify({"product": search_query, "results": results[:10]})
 
