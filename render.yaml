@@ -7,6 +7,10 @@ services:
       pip install -r requirements.txt
       python -m playwright install --with-deps chromium
     startCommand: gunicorn main:app
+    disk:
+      name: playwright-cache
+      mountPath: /opt/render/.cache/ms-playwright
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
