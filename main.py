@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, re, random, time, atexit, threading
+import requests, re, random, time, threading
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 from playwright.sync_api import sync_playwright
@@ -62,29 +62,41 @@ def refresh_proxy_pool():
 threading.Thread(target=refresh_proxy_pool, daemon=True).start()
 
 # -----------------------------
-# Playwright Setup (stealth mode)
+# Playwright lazy setup
 # -----------------------------
-playwright = sync_playwright().start()
-browser = playwright.chromium.launch(
-    headless=True,
-    args=[
-        "--no-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-dev-shm-usage"
-    ]
-)
+playwright = None
+browser = None
 
-def close_browser():
-    browser.close()
-    playwright.stop()
+def get_browser():
+    global playwright, browser
+    if not playwright or not browser:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage"
+            ]
+        )
+    return browser
 
-atexit.register(close_browser)
+@app.teardown_appcontext
+def close_browser(exception=None):
+    global playwright, browser
+    if browser:
+        browser.close()
+        browser = None
+    if playwright:
+        playwright.stop()
+        playwright = None
 
 # -----------------------------
 # Extract price + image
 # -----------------------------
 def extract_price_image_with_playwright(url):
     try:
+        browser = get_browser()
         proxy = get_proxy()
         context = browser.new_context(
             user_agent=random.choice(USER_AGENTS),
@@ -157,9 +169,6 @@ SEARCH_ENGINES = {
     "searx": "https://searx.org/search?q={query}"
 }
 
-# -----------------------------
-# Block junk domains
-# -----------------------------
 BLOCKED_DOMAINS = ["wikipedia.org", "quora.com", "youtube.com", "reddit.com", "news", "blog", "review", "howto", "tutorial"]
 
 def is_shopping_url(url):
@@ -239,6 +248,5 @@ def scrape():
 
     return jsonify({"product": search_query, "results": results[:10]})
 
-# -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
