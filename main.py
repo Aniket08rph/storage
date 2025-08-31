@@ -25,71 +25,41 @@ def get_random_viewport():
     return {"width": random.randint(1280, 1920), "height": random.randint(720, 1080)}
 
 # -----------------------------
-# Extract price + image with Playwright
+# Extract price + image from HTML
 # -----------------------------
-def extract_price_image_from_url(url, proxy=None):
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                proxy=proxy if proxy else None,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
-            )
-            context = browser.new_context(
-                user_agent=get_random_ua(),
-                viewport=get_random_viewport()
-            )
-            page = context.new_page()
-            stealth_sync(page)  # 👈 stealth mode
+def parse_price_image(html):
+    soup = BeautifulSoup(html, "html.parser")
 
-            # block heavy resources
-            def block_resources(route):
-                if route.request.resource_type in ["font", "stylesheet"]:
-                    route.abort()
-                else:
-                    route.continue_()
-            context.route("**/*", block_resources)
+    # --- PRICE ---
+    price_text = soup.get_text()
+    patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+    price = "Price not found"
+    for pattern in patterns:
+        prices = re.findall(pattern, price_text)
+        if prices:
+            price = prices[0]
+            break
 
-            page.goto(url, timeout=20000, wait_until="domcontentloaded")
-            time.sleep(random.uniform(2, 4))  # human-like delay
-            html = page.content()
-            context.close()
-            browser.close()
+    # --- IMAGE ---
+    img_url = None
+    og_img = soup.find("meta", property="og:image")
+    if og_img and og_img.get("content"):
+        img_url = og_img["content"]
 
-        soup = BeautifulSoup(html, "html.parser")
+    if not img_url:
+        img = soup.find("img", {"id": "landingImage"}) or soup.find(
+            "img", {"class": re.compile(r'(product|main).*image', re.I)}
+        )
+        if img and img.get("src"):
+            img_url = img["src"]
 
-        # --- PRICE ---
-        price_text = soup.get_text()
-        patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
-        price = "Price not found"
-        for pattern in patterns:
-            prices = re.findall(pattern, price_text)
-            if prices:
-                price = prices[0]
-                break
+    if not img_url:
+        imgs = soup.find_all("img", src=True)
+        if imgs:
+            img_url = imgs[0]["src"]
 
-        # --- IMAGE ---
-        img_url = None
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_url = og_img["content"]
+    return {"price": price, "image": img_url if img_url else "Image not found"}
 
-        if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find(
-                "img", {"class": re.compile(r'(product|main).*image', re.I)}
-            )
-            if img and img.get("src"):
-                img_url = img["src"]
-
-        if not img_url:
-            imgs = soup.find_all("img", src=True)
-            if imgs:
-                img_url = imgs[0]["src"]
-
-        return {"price": price, "image": img_url if img_url else "Image not found"}
-
-    except Exception as e:
-        return {"price": "Error fetching", "image": None, "error": str(e)}
 
 # -----------------------------
 # Search engine URLs
@@ -109,14 +79,16 @@ BLOCKED_DOMAINS = [
 def is_shopping_url(url):
     return not any(block in url.lower() for block in BLOCKED_DOMAINS)
 
+
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Playwright + Stealth + Multi-Engine + Images) is running!"
+    return "🔥 CreativeScraper (Optimized Playwright) is running!"
 
 @app.route('/ping')
 def ping():
     return jsonify({"status": "ok"}), 200
+
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
@@ -128,68 +100,95 @@ def scrape():
     search_query = f"{query} Buy Online in India"
     results, seen_urls = [], set()
 
-    # (Optional) Rotating proxy list
+    # Proxy pool (optional)
     PROXIES = [
         # {"server": "http://user:pass@proxy1:port"},
-        # {"server": "http://user:pass@proxy2:port"}
     ]
+    proxy = random.choice(PROXIES) if PROXIES else None
 
-    for engine_name, engine_url in SEARCH_ENGINES.items():
-        try:
-            search_url = engine_url.format(query=search_query.replace(" ", "+"))
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox"]
-                )
-                context = browser.new_context(user_agent=get_random_ua())
-                page = context.new_page()
-                stealth_sync(page)
+    try:
+        with sync_playwright() as p:
+            # 🔹 Launch browser once per request
+            browser = p.chromium.launch(
+                headless=True,
+                proxy=proxy,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
+            context = browser.new_context(
+                user_agent=get_random_ua(),
+                viewport=get_random_viewport()
+            )
 
-                page.goto(search_url, timeout=15000)
-                time.sleep(random.uniform(2, 3))
-                html = page.content()
-                context.close()
-                browser.close()
-
-            soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "uddg=" in href:
-                    full_url = unquote(href.split("uddg=")[-1])
-                elif href.startswith("http"):
-                    full_url = href
+            # Block heavy resources
+            def block_resources(route):
+                if route.request.resource_type in ["font", "stylesheet", "media", "xhr", "fetch"]:
+                    route.abort()
                 else:
+                    route.continue_()
+            context.route("**/*", block_resources)
+
+            page = context.new_page()
+            stealth_sync(page)
+
+            # Loop search engines
+            for engine_name, engine_url in SEARCH_ENGINES.items():
+                try:
+                    search_url = engine_url.format(query=search_query.replace(" ", "+"))
+                    page.goto(search_url, timeout=20000)
+                    time.sleep(random.uniform(2, 3))
+                    html = page.content()
+
+                    soup = BeautifulSoup(html, "html.parser")
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+                        if "uddg=" in href:
+                            full_url = unquote(href.split("uddg=")[-1])
+                        elif href.startswith("http"):
+                            full_url = href
+                        else:
+                            continue
+
+                        clean_url = full_url.split("&rut=")[0]
+                        text = a.get_text().strip()
+
+                        if clean_url in seen_urls or not is_shopping_url(clean_url):
+                            continue
+                        seen_urls.add(clean_url)
+
+                        if any(term in text.lower() for term in ["₹", "price", "$", "rs", "buy"]):
+                            # visit product page in same browser
+                            try:
+                                page.goto(clean_url, timeout=20000)
+                                time.sleep(random.uniform(2, 4))
+                                product_html = page.content()
+                                data = parse_price_image(product_html)
+                                if data["price"] not in ["Price not found", "Error fetching"]:
+                                    results.append({
+                                        "title": text,
+                                        "url": clean_url,
+                                        "price": data["price"],
+                                        "image": data["image"]
+                                    })
+                            except Exception:
+                                continue
+
+                        if len(results) >= 10:
+                            break
+                    if results:
+                        break
+
+                    time.sleep(random.uniform(1, 2))
+                except Exception:
                     continue
 
-                clean_url = full_url.split("&rut=")[0]
-                text = a.get_text().strip()
+            context.close()
+            browser.close()
 
-                if clean_url in seen_urls or not is_shopping_url(clean_url):
-                    continue
-                seen_urls.add(clean_url)
-
-                if any(term in text.lower() for term in ["₹", "price", "$", "rs", "buy"]):
-                    proxy = random.choice(PROXIES) if PROXIES else None
-                    data = extract_price_image_from_url(clean_url, proxy=proxy)
-                    if data["price"] not in ["Price not found", "Error fetching"]:
-                        results.append({
-                            "title": text,
-                            "url": clean_url,
-                            "price": data["price"],
-                            "image": data["image"]
-                        })
-
-                if len(results) >= 10:
-                    break
-            if results:
-                break
-
-            time.sleep(random.uniform(1, 2))
-        except Exception:
-            continue
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
     return jsonify({"product": search_query, "results": results[:10]})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
