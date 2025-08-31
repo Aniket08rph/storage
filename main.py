@@ -1,8 +1,8 @@
 from flask import Flask, request, jsonify
-import requests
+import requests, re, random, time
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-import re, random, time
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
@@ -21,46 +21,93 @@ def get_headers():
     return {"User-Agent": random.choice(USER_AGENTS)}
 
 # -----------------------------
-# Extract price + image
+# Block junk domains
 # -----------------------------
-def extract_price_image_from_url(url):
+BLOCKED_DOMAINS = [
+    "wikipedia.org", "quora.com", "youtube.com",
+    "reddit.com", "news", "blog", "review", "howto", "tutorial"
+]
+
+def is_shopping_url(url):
+    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
+
+# -----------------------------
+# Simple requests + BS scraping
+# -----------------------------
+def extract_price_image_requests(url):
     try:
         res = requests.get(url, headers=get_headers(), timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # --- PRICE ---
-        price_text = soup.get_text()
+        # Price
+        text = soup.get_text()
         patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
         price = "Price not found"
         for pattern in patterns:
-            prices = re.findall(pattern, price_text)
+            prices = re.findall(pattern, text)
             if prices:
                 price = prices[0]
                 break
 
-        # --- IMAGE ---
+        # Image
         img_url = None
-        # Priority 1: Open Graph meta tag
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
-        # Priority 2: Amazon, Flipkart, etc. product image IDs/classes
         if not img_url:
             img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
             if img and img.get("src"):
                 img_url = img["src"]
-        # Fallback: First big image
         if not img_url:
             imgs = soup.find_all("img", src=True)
             if imgs:
                 img_url = imgs[0]["src"]
 
-        return {
-            "price": price,
-            "image": img_url if img_url else "Image not found"
-        }
-
+        return {"price": price, "image": img_url if img_url else "Image not found"}
     except Exception:
+        return {"price": "Error fetching", "image": None}
+
+# -----------------------------
+# Playwright scraping for big sites
+# -----------------------------
+def extract_price_image_playwright(url):
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_user_agent(random.choice(USER_AGENTS))
+            page.goto(url, timeout=15000)
+            page.wait_for_timeout(2000)  # 2 sec for JS
+
+            content = page.content()
+
+            # Price
+            patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+            price = "Price not found"
+            for pattern in patterns:
+                prices = re.findall(pattern, content)
+                if prices:
+                    price = prices[0]
+                    break
+
+            # Image
+            img_url = None
+            og_img = page.query_selector('meta[property="og:image"]')
+            if og_img:
+                img_url = og_img.get_attribute("content")
+            if not img_url:
+                img = page.query_selector('img#landingImage') or page.query_selector('img[class*=product]')
+                if img:
+                    img_url = img.get_attribute("src")
+            if not img_url:
+                imgs = page.query_selector_all('img')
+                if imgs:
+                    img_url = imgs[0].get_attribute("src")
+
+            browser.close()
+            return {"price": price, "image": img_url if img_url else "Image not found"}
+    except Exception as e:
+        print("Playwright error:", e)
         return {"price": "Error fetching", "image": None}
 
 # -----------------------------
@@ -77,20 +124,11 @@ SEARCH_ENGINES = {
 }
 
 # -----------------------------
-# Block junk domains
-# -----------------------------
-BLOCKED_DOMAINS = [
-    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
-    "news", "blog", "review", "howto", "tutorial"
-]
-
-def is_shopping_url(url):
-    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
-
+# Routes
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Multi-Engine Fallback + Images) is running!"
+    return "🔥 CreativeScraper (Multi-Engine + Playwright) is running!"
 
 @app.route('/ping')
 def ping():
@@ -100,12 +138,10 @@ def ping():
 def scrape():
     data = request.json
     query = data.get('query')
-
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
     search_query = f"{query} Buy Online in India"
-
     results = []
     seen_urls = set()
 
@@ -117,7 +153,6 @@ def scrape():
                 continue
 
             soup = BeautifulSoup(res.text, "html.parser")
-
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if "uddg=" in href:
@@ -134,24 +169,26 @@ def scrape():
                     continue
                 seen_urls.add(clean_url)
 
-                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
-                    data = extract_price_image_from_url(clean_url)
-                    if data["price"] not in ["Price not found", "Error fetching"]:
-                        results.append({
-                            "title": text,
-                            "url": clean_url,
-                            "price": data["price"],
-                            "image": data["image"]
-                        })
+                # Use Playwright for big known sites
+                if any(big in clean_url.lower() for big in ["amazon.", "flipkart.", "snapdeal."]):
+                    data = extract_price_image_playwright(clean_url)
+                else:
+                    data = extract_price_image_requests(clean_url)
+
+                if data["price"] not in ["Price not found", "Error fetching"]:
+                    results.append({
+                        "title": text,
+                        "url": clean_url,
+                        "price": data["price"],
+                        "image": data["image"]
+                    })
 
                 if len(results) >= 10:
                     break
-
             if results:
                 break
 
             time.sleep(random.uniform(1, 2))
-
         except Exception:
             continue
 
