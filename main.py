@@ -1,11 +1,22 @@
 from flask import Flask, request, jsonify
-import requests, re, random, time, asyncio
+import os, requests, re, random, time, asyncio
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
+import google.generativeai as genai  # ✅ Gemini
 
 app = Flask(__name__)
+
+# -----------------------------
+# Gemini Setup
+# -----------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    gemini_model = None
 
 # -----------------------------
 # Rotating User-Agents
@@ -38,7 +49,7 @@ async def playwright_scrape(url):
         return None
 
 # -----------------------------
-# Extract price + image
+# Extract price + image (basic)
 # -----------------------------
 def extract_price_image_from_html(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -60,7 +71,9 @@ def extract_price_image_from_html(html):
         img_url = og_img["content"]
 
     if not img_url:
-        img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
+        img = soup.find("img", {"id": "landingImage"}) or soup.find(
+            "img", {"class": re.compile(r'(product|main).*image', re.I)}
+        )
         if img and img.get("src"):
             img_url = img["src"]
 
@@ -74,22 +87,53 @@ def extract_price_image_from_html(html):
         "image": img_url if img_url else "Image not found"
     }
 
+# -----------------------------
+# AI-powered Extraction (Gemini)
+# -----------------------------
+def ai_extract_price_image(html):
+    """ Use Gemini to intelligently extract product details from messy HTML """
+    if not gemini_model:
+        return None
+
+    prompt = """
+    You are an e-commerce parser AI. 
+    Extract the main product name, price, and main image URL from the following HTML. 
+    Return only valid JSON in this format:
+    {"title": "...", "price": "...", "image": "..."}
+    """
+
+    try:
+        resp = gemini_model.generate_content([prompt, html])
+        return resp.text
+    except Exception:
+        return None
+
+# -----------------------------
 async def extract_price_image_from_url(url):
     try:
         res = requests.get(url, headers=get_headers(), timeout=8)
-        if res.status_code == 200 and "amazon" not in url and "flipkart" not in url and "croma" not in url:
-            return extract_price_image_from_html(res.text)
+        html = res.text if res.status_code == 200 else None
 
-        html = await playwright_scrape(url)
-        if html:
-            return extract_price_image_from_html(html)
-        else:
+        if not html or any(x in url for x in ["amazon", "flipkart", "croma"]):
+            html = await playwright_scrape(url)
+
+        if not html:
             return {"price": "Error fetching", "image": None}
+
+        # First try regex extraction
+        data = extract_price_image_from_html(html)
+
+        # If Gemini is available, refine the result
+        ai_data = ai_extract_price_image(html)
+        if ai_data:
+            return ai_data
+
+        return data
     except Exception:
         return {"price": "Error fetching", "image": None}
 
 # -----------------------------
-# Search engine URLs
+# Search Engines
 # -----------------------------
 SEARCH_ENGINES = {
     "brave": "https://search.brave.com/search?q={query}",
@@ -115,7 +159,7 @@ def is_shopping_url(url):
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper with Playwright is running!"
+    return "🔥 CreativeScraper with Playwright + Gemini AI is running!"
 
 @app.route('/ping')
 def ping():
@@ -130,8 +174,7 @@ def scrape():
         return jsonify({'error': 'Query required'}), 400
 
     search_query = f"{query} Buy Online in India"
-    results = []
-    seen_urls = set()
+    results, seen_urls = [], set()
 
     async def run_scraper():
         for engine_name, engine_url in SEARCH_ENGINES.items():
@@ -160,20 +203,27 @@ def scrape():
 
                     if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
                         data = await extract_price_image_from_url(clean_url)
+
+                        if isinstance(data, str):  # If Gemini returned raw JSON text
+                            try:
+                                import json
+                                data = json.loads(data)
+                            except Exception:
+                                data = {"price": "AI parse error", "image": None}
+
                         if data["price"] not in ["Price not found", "Error fetching"]:
                             results.append({
-                                "title": text,
+                                "title": text or data.get("title", "Unknown"),
                                 "url": clean_url,
                                 "price": data["price"],
                                 "image": data["image"]
                             })
 
-                    if len(results) >= 20:  # collect up to 20 results
+                    if len(results) >= 20:
                         break
 
                 if len(results) >= 20:
                     break
-
                 time.sleep(random.uniform(1, 2))
 
             except Exception:
