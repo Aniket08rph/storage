@@ -31,70 +31,105 @@ def get_headers():
     return {"User-Agent": random.choice(USER_AGENTS)}
 
 # -----------------------------
-# Extract price + image (Regex + Gemini fallback)
+# Shopping & AI enrichment domains
 # -----------------------------
-def extract_price_image_from_url(url):
+SHOPPING_DOMAINS = ["flipkart.com", "amazon.in", "nykaa.com", "myntra.com", "tatacliq.com"]
+BLOCKED_DOMAINS = ["wikipedia.org", "quora.com", "youtube.com", "reddit.com", "news", "blog", "howto", "tutorial"]
+
+def is_shopping_site(url):
+    return any(domain in url.lower() for domain in SHOPPING_DOMAINS)
+
+def is_allowed_url(url):
+    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
+
+# -----------------------------
+# Extract full product data (price, image, rating, reviews, brand, discount)
+# -----------------------------
+def extract_product_data(url):
     try:
         res = requests.get(url, headers=get_headers(), timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
         html = res.text
 
-        # --- PRICE (regex first) ---
-        price_text = soup.get_text()
-        patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+        # --- Price ---
         price = "Price not found"
-        for pattern in patterns:
-            prices = re.findall(pattern, price_text)
-            if prices:
-                price = prices[0]
+        price_patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+        for pattern in price_patterns:
+            match = re.findall(pattern, soup.get_text())
+            if match:
+                price = match[0]
                 break
 
-        # --- IMAGE ---
+        # --- Image ---
         img_url = None
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
-        if not img_url:
+        else:
             img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
-            if img and img.get("src"):
-                img_url = img["src"]
-        if not img_url:
-            imgs = soup.find_all("img", src=True)
-            if imgs:
-                img_url = imgs[0]["src"]
+            img_url = img["src"] if img and img.get("src") else None
+
+        # --- Rating ---
+        rating = None
+        rating_tag = soup.find(attrs={"class": re.compile(r'rating|stars', re.I)})
+        if rating_tag:
+            rating_match = re.search(r'\d+(\.\d+)?', rating_tag.get_text())
+            rating = rating_match.group() if rating_match else None
+
+        # --- Reviews count ---
+        reviews_count = None
+        rev_tag = soup.find(attrs={"class": re.compile(r'review-count|reviews', re.I)})
+        if rev_tag:
+            count_match = re.search(r'\d+', rev_tag.get_text().replace(',', ''))
+            reviews_count = int(count_match.group()) if count_match else None
+
+        # --- Brand / Seller ---
+        brand = None
+        brand_tag = soup.find(attrs={"class": re.compile(r'brand|seller', re.I)})
+        if brand_tag:
+            brand = brand_tag.get_text().strip()
+
+        # --- Discount / Offer ---
+        discount = None
+        disc_tag = soup.find(attrs={"class": re.compile(r'discount|offer|sale', re.I)})
+        if disc_tag:
+            discount = disc_tag.get_text().strip()
 
         data = {
             "title": soup.title.string if soup.title else "Unknown",
             "price": price,
-            "image": img_url if img_url else "Image not found"
+            "image": img_url or "Image not found",
+            "rating": rating,
+            "reviews_count": reviews_count,
+            "brand": brand,
+            "discount": discount,
+            "url": url
         }
 
-        # --- Gemini AI Fallback ---
+        # --- Gemini AI fallback ---
         if gemini_model:
             try:
-                prompt = """
-                You are an e-commerce parser AI. 
-                Extract the main product name, price, and main image URL from this HTML. 
-                Return JSON only: {"title": "...", "price": "...", "image": "..."}
+                prompt = f"""
+                You are an AI e-commerce parser. Extract product info from the HTML.
+                Return JSON only with keys: title, price, image, rating, reviews_count, brand, discount
+                HTML: {html}
                 """
-                resp = gemini_model.generate_content([prompt, html])
+                resp = gemini_model.generate_content([prompt])
                 ai_data = resp.text.strip()
-
-                # Try to load JSON
                 parsed = json.loads(ai_data)
-                # Overwrite if Gemini gives better data
-                if parsed.get("price") and parsed["price"] != "Price not found":
-                    data = parsed
+                for k in data.keys():
+                    if k in parsed and parsed[k]:
+                        data[k] = parsed[k]
             except Exception:
                 pass
 
         return data
 
     except Exception:
-        return {"title": "Error", "price": "Error fetching", "image": None}
+        return {"title": "Error", "price": "Error", "image": None, "rating": None, "reviews_count": None, "brand": None, "discount": None, "url": url}
 
 # -----------------------------
-# Search engine URLs
+# Search engines
 # -----------------------------
 SEARCH_ENGINES = {
     "brave": "https://search.brave.com/search?q={query}",
@@ -107,17 +142,6 @@ SEARCH_ENGINES = {
 }
 
 # -----------------------------
-# Block junk domains
-# -----------------------------
-BLOCKED_DOMAINS = [
-    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
-    "news", "blog", "review", "howto", "tutorial"
-]
-
-def is_shopping_url(url):
-    return not any(block in url.lower() for block in BLOCKED_DOMAINS)
-
-# -----------------------------
 @app.route('/')
 def home():
     return "🔥 CreativeScraper (Multi-Engine + Gemini AI) is running!"
@@ -126,16 +150,18 @@ def home():
 def ping():
     return jsonify({"status": "ok"}), 200
 
+# -----------------------------
+# Scrape endpoint
+# -----------------------------
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
     query = data.get('query')
-
     if not query:
         return jsonify({'error': 'Query required'}), 400
 
     search_query = f"{query} Buy Online in India"
-    results, seen_urls = [], set()
+    results, seen_urls, ai_sources = [], set(), []
 
     for engine_name, engine_url in SEARCH_ENGINES.items():
         try:
@@ -157,35 +183,47 @@ def scrape():
 
                 clean_url = full_url.split("&rut=")[0]
                 text = a.get_text().strip()
-
-                if clean_url in seen_urls or not is_shopping_url(clean_url):
+                if clean_url in seen_urls:
                     continue
                 seen_urls.add(clean_url)
 
-                if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
-                    product_data = extract_price_image_from_url(clean_url)
-                    if product_data["price"] not in ["Price not found", "Error fetching"]:
-                        results.append({
-                            "title": product_data.get("title", text),
-                            "url": clean_url,
-                            "price": product_data["price"],
-                            "image": product_data["image"]
-                        })
+                # Collect all allowed URLs for AI analysis
+                if is_allowed_url(clean_url):
+                    ai_sources.append(clean_url)
 
-                if len(results) >= 10:
-                    break
-
-            if results:
-                break
+                # Only add shopping sites to results
+                if is_shopping_site(clean_url):
+                    product_data = extract_product_data(clean_url)
+                    results.append(product_data)
 
             time.sleep(random.uniform(1, 2))
-
         except Exception:
             continue
 
+    # -----------------------------
+    # Final Gemini AI analysis for all results
+    # -----------------------------
+    ai_analysis = {}
+    if gemini_model and results:
+        try:
+            prompt = f"""
+            You are an expert AI shopping assistant. Analyze the following product list and provide:
+            - Best options per category
+            - Recommendations based on price, rating, reviews
+            - Pros/cons summary
+            Return as JSON with keys: best_options, recommendations, summary
+            Product List: {json.dumps(results)}
+            """
+            resp = gemini_model.generate_content([prompt])
+            ai_analysis = json.loads(resp.text.strip())
+        except Exception:
+            ai_analysis = {"error": "Gemini analysis failed"}
+
     return jsonify({
         "product": search_query,
-        "results": results[:10]
+        "shopping_results": results,
+        "ai_analysis": ai_analysis,
+        "ai_sources_count": len(ai_sources)
     })
 
 if __name__ == '__main__':
