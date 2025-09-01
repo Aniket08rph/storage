@@ -14,4 +14,6 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.cache/ms-playwright
     healthCheckPath: /ping
