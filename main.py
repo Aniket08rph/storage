@@ -1,8 +1,9 @@
 from flask import Flask, request, jsonify
-import requests, re, random, time, atexit, threading
+import requests, re, random, time, asyncio
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 app = Flask(__name__)
 
@@ -21,118 +22,69 @@ def get_headers():
     return {"User-Agent": random.choice(USER_AGENTS)}
 
 # -----------------------------
-# Proxy Pool (Auto-refresh from free-proxy-list.net)
+# Playwright Scraper (JS-heavy sites)
 # -----------------------------
-PROXIES = []
-
-def fetch_proxies():
-    global PROXIES
+async def playwright_scrape(url):
     try:
-        res = requests.get("https://free-proxy-list.net/", timeout=10, headers=get_headers())
-        soup = BeautifulSoup(res.text, "html.parser")
-        proxies = []
-        for row in soup.select("table tbody tr")[:50]:  # top 50
-            cols = row.find_all("td")
-            ip, port, https = cols[0].text, cols[1].text, cols[6].text
-            if https == "yes":  # keep only HTTPS
-                proxies.append(f"http://{ip}:{port}")
-        if proxies:
-            PROXIES = proxies
-            print(f"[Proxy] Updated {len(PROXIES)} proxies")
-    except Exception as e:
-        print(f"[Proxy] Failed to fetch proxies: {e}")
-
-def get_proxy():
-    if not PROXIES:
-        fetch_proxies()
-    return random.choice(PROXIES) if PROXIES else None
-
-# Refresh proxy list every 10 minutes in background
-def refresh_proxy_pool():
-    while True:
-        fetch_proxies()
-        time.sleep(600)
-
-threading.Thread(target=refresh_proxy_pool, daemon=True).start()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = await browser.new_page()
+            await stealth_async(page)
+            await page.goto(url, timeout=20000)
+            content = await page.content()
+            await browser.close()
+            return content
+    except Exception:
+        return None
 
 # -----------------------------
-# Playwright Setup
+# Extract price + image
 # -----------------------------
-playwright = sync_playwright().start()
-browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+def extract_price_image_from_html(html):
+    soup = BeautifulSoup(html, 'html.parser')
 
-def close_browser():
-    browser.close()
-    playwright.stop()
+    # --- PRICE ---
+    price_text = soup.get_text()
+    patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
+    price = "Price not found"
+    for pattern in patterns:
+        prices = re.findall(pattern, price_text)
+        if prices:
+            price = prices[0]
+            break
 
-atexit.register(close_browser)
+    # --- IMAGE ---
+    img_url = None
+    og_img = soup.find("meta", property="og:image")
+    if og_img and og_img.get("content"):
+        img_url = og_img["content"]
 
-# -----------------------------
-# Extract price + image (Playwright)
-# -----------------------------
-def extract_price_image_with_playwright(url):
+    if not img_url:
+        img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
+        if img and img.get("src"):
+            img_url = img["src"]
+
+    if not img_url:
+        imgs = soup.find_all("img", src=True)
+        if imgs:
+            img_url = imgs[0]["src"]
+
+    return {
+        "price": price,
+        "image": img_url if img_url else "Image not found"
+    }
+
+async def extract_price_image_from_url(url):
     try:
-        proxy = get_proxy()
-        context = browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            proxy={"server": proxy} if proxy else None
-        )
-        page = context.new_page()
-        page.goto(url, timeout=25000, wait_until="domcontentloaded")
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        context.close()
+        res = requests.get(url, headers=get_headers(), timeout=8)
+        if res.status_code == 200 and "amazon" not in url and "flipkart" not in url and "croma" not in url:
+            return extract_price_image_from_html(res.text)
 
-        # PRICE
-        price_text = soup.get_text()
-        patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
-        price = next((m for p in patterns for m in re.findall(p, price_text)), "Price not found")
-
-        # IMAGE
-        img_url = None
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_url = og_img["content"]
-        if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
-            if img and img.get("src"):
-                img_url = img["src"]
-        if not img_url and soup.find_all("img", src=True):
-            img_url = soup.find_all("img", src=True)[0]["src"]
-
-        return {"price": price, "image": img_url or "Image not found"}
-
-    except Exception as e:
-        return {"price": "Error fetching", "image": None, "error": str(e)}
-
-# -----------------------------
-# Extract with Requests (faster)
-# -----------------------------
-def extract_price_image_requests(url):
-    try:
-        proxy = get_proxy()
-        res = requests.get(url, headers=get_headers(), timeout=12, proxies={"http": proxy, "https": proxy} if proxy else None)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        # PRICE
-        price_text = soup.get_text()
-        patterns = [r'₹\s?[0-9,]+', r'Rs\.?\s?[0-9,]+', r'\$[0-9,.]+']
-        price = next((m for p in patterns for m in re.findall(p, price_text)), "Price not found")
-
-        # IMAGE
-        img_url = None
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_url = og_img["content"]
-        if not img_url:
-            img = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": re.compile(r'(product|main).*image', re.I)})
-            if img and img.get("src"):
-                img_url = img["src"]
-        if not img_url and soup.find_all("img", src=True):
-            img_url = soup.find_all("img", src=True)[0]["src"]
-
-        return {"price": price, "image": img_url or "Image not found"}
-
+        html = await playwright_scrape(url)
+        if html:
+            return extract_price_image_from_html(html)
+        else:
+            return {"price": "Error fetching", "image": None}
     except Exception:
         return {"price": "Error fetching", "image": None}
 
@@ -152,7 +104,10 @@ SEARCH_ENGINES = {
 # -----------------------------
 # Block junk domains
 # -----------------------------
-BLOCKED_DOMAINS = ["wikipedia.org", "quora.com", "youtube.com", "reddit.com", "news", "blog", "review", "howto", "tutorial"]
+BLOCKED_DOMAINS = [
+    "wikipedia.org", "quora.com", "youtube.com", "reddit.com",
+    "news", "blog", "review", "howto", "tutorial"
+]
 
 def is_shopping_url(url):
     return not any(block in url.lower() for block in BLOCKED_DOMAINS)
@@ -160,7 +115,7 @@ def is_shopping_url(url):
 # -----------------------------
 @app.route('/')
 def home():
-    return "🔥 CreativeScraper (Playwright + Requests + Free Proxy Rotation) is running!"
+    return "🔥 CreativeScraper with Playwright is running!"
 
 @app.route('/ping')
 def ping():
@@ -169,66 +124,69 @@ def ping():
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
-    query = data.get("query")
+    query = data.get('query')
 
     if not query:
-        return jsonify({"error": "Query required"}), 400
+        return jsonify({'error': 'Query required'}), 400
 
     search_query = f"{query} Buy Online in India"
-    results, seen_urls = [], set()
+    results = []
+    seen_urls = set()
 
-    for engine_name, engine_url in SEARCH_ENGINES.items():
-        try:
-            search_url = engine_url.format(query=search_query.replace(" ", "+"))
-            proxy = get_proxy()
-            res = requests.get(search_url, headers=get_headers(), timeout=12, proxies={"http": proxy, "https": proxy} if proxy else None)
-            if res.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(res.text, "html.parser")
-
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "uddg=" in href:
-                    full_url = unquote(href.split("uddg=")[-1])
-                elif href.startswith("http"):
-                    full_url = href
-                else:
+    async def run_scraper():
+        for engine_name, engine_url in SEARCH_ENGINES.items():
+            try:
+                search_url = engine_url.format(query=search_query.replace(' ', '+'))
+                res = requests.get(search_url, headers=get_headers(), timeout=8)
+                if res.status_code != 200:
                     continue
 
-                clean_url = full_url.split("&rut=")[0]
-                text = a.get_text().strip()
+                soup = BeautifulSoup(res.text, "html.parser")
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if "uddg=" in href:
+                        full_url = unquote(href.split("uddg=")[-1])
+                    elif href.startswith("http"):
+                        full_url = href
+                    else:
+                        continue
 
-                if clean_url in seen_urls or not is_shopping_url(clean_url):
-                    continue
-                seen_urls.add(clean_url)
+                    clean_url = full_url.split("&rut=")[0]
+                    text = a.get_text().strip()
 
-                if any(term in text.lower() for term in ["₹", "price", "$", "rs", "buy"]):
-                    data = extract_price_image_requests(clean_url)
-                    if data["price"] in ["Price not found", "Error fetching"]:
-                        data = extract_price_image_with_playwright(clean_url)
+                    if clean_url in seen_urls or not is_shopping_url(clean_url):
+                        continue
+                    seen_urls.add(clean_url)
 
-                    if data["price"] not in ["Price not found", "Error fetching"]:
-                        results.append({
-                            "title": text,
-                            "url": clean_url,
-                            "price": data["price"],
-                            "image": data["image"]
-                        })
+                    if any(term in text.lower() for term in ['₹', 'price', '$', 'rs', 'buy']):
+                        data = await extract_price_image_from_url(clean_url)
+                        if data["price"] not in ["Price not found", "Error fetching"]:
+                            results.append({
+                                "title": text,
+                                "url": clean_url,
+                                "price": data["price"],
+                                "image": data["image"]
+                            })
 
-                if len(results) >= 10:
+                    if len(results) >= 20:  # collect up to 20 results
+                        break
+
+                if len(results) >= 20:
                     break
 
-            if results:
-                break
+                time.sleep(random.uniform(1, 2))
 
-            time.sleep(random.uniform(1, 2))
+            except Exception:
+                continue
 
-        except Exception as e:
-            print(f"[Scrape error] {e}")
-            continue
+        return results[:20]
 
-    return jsonify({"product": search_query, "results": results[:10]})
+    final_results = asyncio.run(run_scraper())
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    return jsonify({
+        "product": search_query,
+        "results": final_results
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
